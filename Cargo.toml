@@ -1,11 +1,13 @@
 [workspace]
 members = [".", "crates/core", "crates/runtime"]
+exclude = ["mpi-hello"]
 resolver = "2"
 
 [workspace.dependencies]
-ndarray     = "0.15"
+ndarray     = { version = "0.15", features = ["serde"] }
+mpi         = { version = "0.8", features = ["derive"] }
 rayon       = "1"
-tokio       = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde       = { version = "1", features = ["derive"] }
 bincode     = "1"
 thiserror   = "1"

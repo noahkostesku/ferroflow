@@ -1,0 +1,41 @@
+# Rust
+/target/
+Cargo.lock
+
+# Benchmark artifacts
+*.out
+*.err
+*.csv
+criterion/
+
+# SLURM output files
+slurm/*.out
+slurm/*.err
+
+# Environment / secrets
+.env
+.env.local
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Personal Claude preferences (never commit)
+CLAUDE.local.md
+
+# Claude Code / agent working directories (session state, skills cache, etc.)
+.claude/
+
+# Cursor: ignore local editor state under `.cursor/`, but allow shared `.cursor/rules/` if present.
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
+
+# OS / misc
+Thumbs.db

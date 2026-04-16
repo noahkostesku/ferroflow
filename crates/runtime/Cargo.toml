@@ -3,11 +3,18 @@ name    = "ferroflow-runtime"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+distributed = ["ferroflow-core/distributed", "dep:mpi"]
+
 [dependencies]
 ferroflow-core = { workspace = true }
 rayon          = { workspace = true }
 tokio          = { workspace = true }
 thiserror      = { workspace = true }
+serde          = { workspace = true }
+bincode        = { workspace = true }
+anyhow         = { workspace = true }
+mpi            = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion      = { workspace = true }

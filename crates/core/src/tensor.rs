@@ -1,4 +1,5 @@
 use ndarray::{Array, ArrayD, IxDyn};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Errors from [`Tensor`] construction.
@@ -10,7 +11,7 @@ pub enum TensorError {
 }
 
 /// A dense f32 tensor backed by an n-dimensional [`ndarray::ArrayD`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tensor {
     pub data: ArrayD<f32>,
 }

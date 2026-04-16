@@ -3,6 +3,9 @@ name    = "ferroflow-core"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+distributed = []
+
 [dependencies]
 ndarray   = { workspace = true }
 rayon     = { workspace = true }

@@ -2,7 +2,7 @@
 
 > Check this file at the start of every session to orient on current status.
 
-Last updated: 2026-04-16
+Last updated: 2026-04-17
 
 ---
 
@@ -24,8 +24,10 @@ _Target: 2026-04-20_
 ## Week 2 — MPI Setup, Static Scheduler, Work-Stealing Protocol
 _Target: 2026-04-27_
 
-- [ ] Add `rsmpi` dependency; verify MPI environment on Narval
-- [ ] Implement `Message` enum + `bincode` serialization in `crates/core/src/transport/messages.rs`
+- [x] Add `distributed` feature flag to `ferroflow-core` and `ferroflow-runtime`; `mpi` workspace dep declared, gated behind feature; `mpi-hello` excluded from workspace (Narval-only)
+- [x] Worker abstractions: `WorkerId`, `WorkQueue` (Arc+Mutex), `Message` enum (Serialize/Deserialize + bincode roundtrip), `WorkerTrait` — in `crates/runtime/src/worker.rs`
+- [ ] Verify `rsmpi`/MPI environment on Narval (`cargo test -p ferroflow-runtime --features distributed`)
+- [ ] MPI send/recv wrappers with `spawn_blocking` in `crates/runtime/src/transport/mpi_transport.rs`
 - [ ] MPI send/recv wrappers with `spawn_blocking` in `crates/runtime/src/transport/mpi_transport.rs`
 - [ ] Static scheduler: round-robin op assignment across ranks
 - [ ] Multi-node integration test with static scheduler (4-rank smoke test)
@@ -68,5 +70,6 @@ _Target: 2026-05-11_
 ## Notes / Blockers
 
 - **2026-04-16:** `cargo bench` requires `-j2` flag on this dev machine (build scripts OOM at default parallelism). On Narval this should not be an issue.
+- **2026-04-17:** `mpi-hello` excluded from workspace — it requires an MPI library at link time and is Narval-only. Build it standalone on the cluster. `tokio/sync` feature added to workspace dep.
 - **Benchmark baseline (local, unoptimised HW):** 20-op 128×128 matmul chain ≈ 1.02 ms. Re-run on Narval compute node for the canonical result.
 - **Week 1 remaining:** CI setup (clippy in GH Actions). All code complete.
