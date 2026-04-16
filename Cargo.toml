@@ -1,0 +1,38 @@
+[workspace]
+members = [".", "crates/core", "crates/runtime"]
+resolver = "2"
+
+[workspace.dependencies]
+ndarray     = "0.15"
+rayon       = "1"
+tokio       = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde       = { version = "1", features = ["derive"] }
+bincode     = "1"
+thiserror   = "1"
+anyhow      = "1"
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+criterion   = { version = "0.5", features = ["html_reports"] }
+ferroflow-core    = { path = "crates/core" }
+ferroflow-runtime = { path = "crates/runtime" }
+
+# ── root binary ─────────────────────────────────────────────────────────────
+
+[package]
+name        = "ferroflow"
+version     = "0.1.0"
+edition     = "2021"
+description = "Distributed work-stealing tensor computation scheduler"
+
+[[bin]]
+name = "ferroflow"
+path = "src/main.rs"
+
+[dependencies]
+ferroflow-core    = { workspace = true }
+ferroflow-runtime = { workspace = true }
+clap    = { version = "4", features = ["derive"] }
+anyhow  = { workspace = true }
+tokio   = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

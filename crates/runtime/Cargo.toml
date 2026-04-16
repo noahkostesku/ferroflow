@@ -1,0 +1,19 @@
+[package]
+name    = "ferroflow-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ferroflow-core = { workspace = true }
+rayon          = { workspace = true }
+tokio          = { workspace = true }
+thiserror      = { workspace = true }
+
+[dev-dependencies]
+criterion      = { workspace = true }
+ferroflow-core = { workspace = true }
+ndarray        = { workspace = true }
+
+[[bench]]
+name    = "dag_bench"
+harness = false

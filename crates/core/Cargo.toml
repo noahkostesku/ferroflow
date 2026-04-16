@@ -1,0 +1,11 @@
+[package]
+name    = "ferroflow-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ndarray   = { workspace = true }
+rayon     = { workspace = true }
+serde     = { workspace = true }
+bincode   = { workspace = true }
+thiserror = { workspace = true }
