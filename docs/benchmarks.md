@@ -117,7 +117,7 @@ _Full multi-node scaling results (4 / 8 / 16 / 32 nodes) pending Narval runs._
 - exit: 0
 - git: f3f0ccc
 
-## Criterion Timing
+## Criterion Timing - Local
 
   | Scheduler     | DAG     |     Throughput | Idle%  | Steal Rate |      
   |---------------|---------|----------------|--------|------------|      
