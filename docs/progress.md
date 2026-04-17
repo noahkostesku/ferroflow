@@ -2,7 +2,7 @@
 
 > Check this file at the start of every session to orient on current status.
 
-Last updated: 2026-04-17
+Last updated: 2026-04-16
 
 ---
 
@@ -27,14 +27,14 @@ _Target: 2026-04-27_
 - [x] Add `distributed` feature flag to `ferroflow-core` and `ferroflow-runtime`; `mpi` workspace dep declared, gated behind feature; `mpi-hello` excluded from workspace (Narval-only)
 - [x] Worker abstractions: `WorkerId`, `WorkQueue` (Arc+Mutex), `Message` enum (Serialize/Deserialize + bincode roundtrip), `WorkerTrait` — in `crates/runtime/src/worker.rs`
 - [ ] Verify `rsmpi`/MPI environment on Narval (`cargo test -p ferroflow-runtime --features distributed`)
-- [ ] MPI send/recv wrappers with `spawn_blocking` in `crates/runtime/src/transport/mpi_transport.rs`
-- [ ] MPI send/recv wrappers with `spawn_blocking` in `crates/runtime/src/transport/mpi_transport.rs`
+- [ ] Verify `rsmpi`/MPI environment on Narval (`cargo test -p ferroflow-runtime --features distributed`)
+- [x] MPI worker bridge: `crates/runtime/src/mpi_worker.rs` (rank 0 = coordinator, ranks 1..N = workers; pull-based steal protocol over MPI point-to-point; bincode serialization; shutdown drain)
+- [x] Integration test: 4-op diamond DAG — run with `mpirun -n 2 cargo test -p ferroflow-runtime --features distributed -- --test-threads=1`
+- [x] SLURM script: `slurm/ferroflow.sh` (parameterized, def-cbravo, 30 min, openmpi 5.0.8, appends to benchmarks.md)
+- [ ] End-to-end run on Narval: `cargo build --release --features distributed && sbatch slurm/ferroflow.sh`
+- [ ] Second run: `sbatch --nodes=4 slurm/ferroflow.sh`
 - [ ] Static scheduler: round-robin op assignment across ranks
 - [ ] Multi-node integration test with static scheduler (4-rank smoke test)
-- [ ] Coordinator event loop
-- [ ] Worker steal-request loop
-- [ ] End-to-end work-stealing execution on 2 nodes (8 ranks) on Narval
-- [ ] SLURM script: `slurm/dev-run.sh` for small dev jobs
 - [ ] SLURM script: `slurm/bench-static.sh`
 - [ ] SLURM script: `slurm/bench-workstealing.sh`
 
@@ -70,6 +70,7 @@ _Target: 2026-05-11_
 ## Notes / Blockers
 
 - **2026-04-16:** `cargo bench` requires `-j2` flag on this dev machine (build scripts OOM at default parallelism). On Narval this should not be an issue.
-- **2026-04-17:** `mpi-hello` excluded from workspace — it requires an MPI library at link time and is Narval-only. Build it standalone on the cluster. `tokio/sync` feature added to workspace dep.
+- **2026-04-16:** `mpi-hello` excluded from workspace — it requires an MPI library at link time and is Narval-only. Build it standalone on the cluster. `tokio/sync` feature added to workspace dep.
+- **2026-04-16:** `MpiWorker` in `crates/runtime/src/mpi_worker.rs` (Week 2 Session 3). Coordinator event loop + worker steal loop over MPI point-to-point, bincode messages, exponential backoff on StealNone, shutdown drain. Diamond DAG integration test skips gracefully without mpirun.
 - **Benchmark baseline (local, unoptimised HW):** 20-op 128×128 matmul chain ≈ 1.02 ms. Re-run on Narval compute node for the canonical result.
 - **Week 1 remaining:** CI setup (clippy in GH Actions). All code complete.

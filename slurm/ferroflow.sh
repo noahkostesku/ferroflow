@@ -1,29 +1,50 @@
 #!/bin/bash
-#SBATCH --job-name=ferroflow-bench
-#SBATCH --account=<your-account>        # replace with your Alliance account
-#SBATCH --time=01:00:00
-#SBATCH --nodes=16
-#SBATCH --ntasks-per-node=2
+# ferroflow distributed work-stealing benchmark job.
+# Default: 2 nodes, 1 rank/node.  Override node count at submission time:
+#   sbatch --nodes=4 slurm/ferroflow.sh
+# Or export FERROFLOW_NODES before calling this wrapper script.
+#
+#SBATCH --job-name=ferroflow
+#SBATCH --account=def-cbravo
+#SBATCH --time=00:30:00
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=0
-#SBATCH --output=%x-%j-out.txt
-#SBATCH --error=%x-%j-err.txt
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
 
-module load StdEnv/2023 gcc openmpi rust
+module load StdEnv/2023 llvm openmpi rust/1.91.0
 
-export CARGO_TARGET_DIR=$SCRATCH/ferroflow-target
-export RAYON_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export LD_LIBRARY_PATH=/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/Compiler/llvm21/openmpi/5.0.8/lib:${LD_LIBRARY_PATH}
+export RAYON_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+export CARGO_TARGET_DIR=${SCRATCH}/ferroflow-target
 
-cd $SLURM_SUBMIT_DIR
-cargo build --release 2>&1 | tail -5
+cd "${SLURM_SUBMIT_DIR}"
 
-BINARY=$CARGO_TARGET_DIR/release/ferroflow
+echo "[ferroflow] job ${SLURM_JOB_ID}: ${SLURM_NNODES} nodes, ${SLURM_NTASKS} ranks, ${SLURM_CPUS_PER_TASK} threads/rank"
+echo "[ferroflow] started: $(date -Iseconds)"
 
-echo "Job $SLURM_JOB_ID: $SLURM_NNODES nodes, $SLURM_NTASKS ranks"
-echo "Started: $(date)"
+cargo build --release --features distributed 2>&1 | tail -5
 
-mpirun -n $SLURM_NTASKS \
-    --map-by ppr:$SLURM_NTASKS_PER_NODE:node:pe=$SLURM_CPUS_PER_TASK \
-    $BINARY
+BINARY="${CARGO_TARGET_DIR}/release/ferroflow"
 
-echo "Finished: $(date)"
+srun --ntasks="${SLURM_NTASKS}" \
+     --cpus-per-task="${SLURM_CPUS_PER_TASK}" \
+     "${BINARY}"
+
+STATUS=$?
+FINISH=$(date -Iseconds)
+
+echo "[ferroflow] finished: ${FINISH}  exit=${STATUS}"
+
+# Append a summary line to the benchmark log.
+cat >> "${SLURM_SUBMIT_DIR}/docs/benchmarks.md" <<EOF
+
+## ${FINISH}  job=${SLURM_JOB_ID}
+- nodes: ${SLURM_NNODES}
+- ranks: ${SLURM_NTASKS}  (${SLURM_NTASKS_PER_NODE} per node)
+- threads/rank: ${SLURM_CPUS_PER_TASK}
+- exit: ${STATUS}
+- git: $(git -C "${SLURM_SUBMIT_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)
+EOF

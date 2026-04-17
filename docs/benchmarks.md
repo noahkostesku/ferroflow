@@ -65,3 +65,10 @@ This makes the scheduler reactive under load (fast wake on completion) while sti
 ---
 
 _Week 3 results pending — Narval multi-node runs._
+
+## 2026-04-16T21:34:44-04:00  job=59467408
+- nodes: 2
+- ranks: 2  (1 per node)
+- threads/rank: 32
+- exit: 0
+- git: f3f0ccc
