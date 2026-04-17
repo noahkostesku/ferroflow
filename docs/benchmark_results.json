@@ -100,5 +100,209 @@
       "successful_steals": 0,
       "steal_rate": 0.0
     }
+  },
+  {
+    "scheduler": "sequential",
+    "nodes": 2,
+    "workers_per_node": 1,
+    "dag_size": 41,
+    "skew": false,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 1.702634,
+      "throughput_ops_per_sec": 11746.505708214449,
+      "idle_time_ms": 0.0,
+      "steal_attempts": 0,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "static",
+    "nodes": 2,
+    "workers_per_node": 2,
+    "dag_size": 41,
+    "skew": false,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 2.241063,
+      "throughput_ops_per_sec": 8924.336352882538,
+      "idle_time_ms": 1.951,
+      "steal_attempts": 0,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "work-stealing",
+    "nodes": 2,
+    "workers_per_node": 2,
+    "dag_size": 41,
+    "skew": false,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 1.902464,
+      "throughput_ops_per_sec": 10512.682500168205,
+      "idle_time_ms": 1.883,
+      "steal_attempts": 2,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "sequential",
+    "nodes": 2,
+    "workers_per_node": 1,
+    "dag_size": 22,
+    "skew": true,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 61.134149,
+      "throughput_ops_per_sec": 327.1493973032977,
+      "idle_time_ms": 0.0,
+      "steal_attempts": 0,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "static",
+    "nodes": 2,
+    "workers_per_node": 2,
+    "dag_size": 22,
+    "skew": true,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 30.673974,
+      "throughput_ops_per_sec": 652.0185483628564,
+      "idle_time_ms": 0.0,
+      "steal_attempts": 0,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "work-stealing",
+    "nodes": 2,
+    "workers_per_node": 2,
+    "dag_size": 22,
+    "skew": true,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 30.652254,
+      "throughput_ops_per_sec": 652.4805647245387,
+      "idle_time_ms": 0.03,
+      "steal_attempts": 2,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "sequential",
+    "nodes": 4,
+    "workers_per_node": 1,
+    "dag_size": 41,
+    "skew": false,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 1.741495,
+      "throughput_ops_per_sec": 11484.38554230704,
+      "idle_time_ms": 0.0,
+      "steal_attempts": 0,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "static",
+    "nodes": 4,
+    "workers_per_node": 4,
+    "dag_size": 41,
+    "skew": false,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 2.095974,
+      "throughput_ops_per_sec": 9542.10309860714,
+      "idle_time_ms": 5.103,
+      "steal_attempts": 0,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "work-stealing",
+    "nodes": 4,
+    "workers_per_node": 4,
+    "dag_size": 41,
+    "skew": false,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 2.0938139999999996,
+      "throughput_ops_per_sec": 9551.946830043164,
+      "idle_time_ms": 6.13,
+      "steal_attempts": 27,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "sequential",
+    "nodes": 4,
+    "workers_per_node": 1,
+    "dag_size": 22,
+    "skew": true,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 61.138839,
+      "throughput_ops_per_sec": 327.1243014608112,
+      "idle_time_ms": 0.0,
+      "steal_attempts": 0,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "static",
+    "nodes": 4,
+    "workers_per_node": 4,
+    "dag_size": 22,
+    "skew": true,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 17.373076,
+      "throughput_ops_per_sec": 1151.2066141885293,
+      "idle_time_ms": 0.0,
+      "steal_attempts": 0,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "work-stealing",
+    "nodes": 4,
+    "workers_per_node": 4,
+    "dag_size": 22,
+    "skew": true,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 17.360526,
+      "throughput_ops_per_sec": 1152.0388264733454,
+      "idle_time_ms": 8.029,
+      "steal_attempts": 27,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
   }
 ]

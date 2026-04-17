@@ -127,3 +127,39 @@ _Full multi-node scaling results (4 / 8 / 16 / 32 nodes) pending Narval runs._
   | sequential    | skewed  |      268 ops/s |   0.0% |      0.0/s |      
   | static        | skewed  |      935 ops/s |   0.0% |      0.0/s |      
   | work-stealing | skewed  |      935 ops/s |  11.5% |      0.0/s | 
+
+
+---
+
+### 2026-04-16T22:42:26-04:00 — Narval multi-node benchmark (job 59471496)
+
+- **Machine:** Narval (Alliance Canada)  |  **Job:** 59471496
+- **Nodes allocated:** 4  |  **CPUs/task:** 32
+- **Commit:** 10f3d58
+- **DAG:** 20-op uniform (128×128 matmul) and skewed (Slow × 5)
+- **Configs tested:** 2-node and 4-node worker counts
+- **Full RunMetrics:** `docs/benchmark_results.json`
+
+
+## Scheduler Comparison
+
+| Scheduler     | Nodes | DAG     |     Throughput |  Idle% | Steal Rate |
+|---------------|-------|---------|----------------|--------|------------|
+| sequential    |     1 | uniform |         17145 /s |   0.0% |       0.0/s |
+| static        |     1 | uniform |         14099 /s |  64.1% |       0.0/s |
+| work-stealing |     1 | uniform |         16087 /s |  66.3% |       0.0/s |
+| sequential    |     1 | skewed  |           268 /s |   0.0% |       0.0/s |
+| static        |     1 | skewed  |           935 /s |   0.0% |       0.0/s |
+| work-stealing |     1 | skewed  |           935 /s |  11.5% |       0.0/s |
+| sequential    |     2 | uniform |         11747 /s |   0.0% |       0.0/s |
+| static        |     2 | uniform |          8924 /s |  43.5% |       0.0/s |
+| work-stealing |     2 | uniform |         10513 /s |  49.5% |       0.0/s |
+| sequential    |     2 | skewed  |           327 /s |   0.0% |       0.0/s |
+| static        |     2 | skewed  |           652 /s |   0.0% |       0.0/s |
+| work-stealing |     2 | skewed  |           652 /s |   0.0% |       0.0/s |
+| sequential    |     4 | uniform |         11484 /s |   0.0% |       0.0/s |
+| static        |     4 | uniform |          9542 /s |  60.9% |       0.0/s |
+| work-stealing |     4 | uniform |          9552 /s |  73.2% |       0.0/s |
+| sequential    |     4 | skewed  |           327 /s |   0.0% |       0.0/s |
+| static        |     4 | skewed  |          1151 /s |   0.0% |       0.0/s |
+| work-stealing |     4 | skewed  |          1152 /s |  11.6% |       0.0/s |
