@@ -10,10 +10,8 @@ use ferroflow_runtime::{SequentialExecutor, StaticScheduler, WorkStealingSchedul
 // ── CLI types ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, ValueEnum)]
-enum DagKind {
-    /// Linear matmul chain — no skew; all ops have equal cost.
+enum LocalDagKind {
     Uniform,
-    /// Two-branch DAG with Slow ops; one branch is `skew_factor` times slower.
     Skewed,
 }
 
@@ -27,52 +25,99 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run all three schedulers on a given DAG topology and record RunMetrics.
+    /// Run all three local schedulers on a DAG and record RunMetrics.
+    ///
+    /// Runs sequential, static, and work-stealing in-process and appends results
+    /// to the output file (JSON array).
     Bench {
-        /// DAG topology to benchmark.
         #[arg(long, default_value = "uniform")]
-        dag: DagKind,
-
-        /// Number of parallel tokio workers (proxy for node count in local runs).
+        dag: LocalDagKind,
         #[arg(long, default_value = "4")]
         workers: usize,
-
-        /// Value to record in the `nodes` field of RunMetrics (for Narval runs,
-        /// set this to SLURM_NNODES).
         #[arg(long, default_value = "1")]
         nodes: u32,
-
-        /// Number of compute ops in the DAG (must be even for skewed DAGs).
         #[arg(long, default_value = "20")]
         dag_ops: usize,
-
-        /// Slow-branch slowdown factor (skewed DAGs only).
         #[arg(long, default_value = "5")]
         skew_factor: u64,
-
-        /// Matrix dimension for uniform matmul chains.
         #[arg(long, default_value = "128")]
         chain_dim: usize,
-
-        /// Append results to this JSON file (creates the file if absent).
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// Print a markdown comparison table from a saved benchmark_results.json.
+
+    /// Print a markdown comparison table from a saved RunMetrics JSON file.
     Report {
-        /// Path to the JSON results file.
         input: PathBuf,
+    },
+
+    /// Run the MPI distributed scheduler across all MPI ranks.
+    ///
+    /// All ranks must call this simultaneously (typical SPMD pattern).
+    /// Rank 0 prints results and optionally appends to the output JSON file;
+    /// worker ranks exit silently after receiving Shutdown.
+    ///
+    /// Build with `--features distributed` to enable this subcommand.
+    #[cfg(feature = "distributed")]
+    MpiBench {
+        /// DAG topology: uniform (all ops equal cost) or skewed (half slow, half fast).
+        #[arg(long, default_value = "uniform")]
+        dag: MpiDagKind,
+
+        /// Scheduling mode: static pre-assignment or demand-driven work-stealing.
+        #[arg(long, default_value = "work-stealing")]
+        scheduler: MpiSchedulerKind,
+
+        /// Total compute ops in the DAG (must be even for skewed).
+        #[arg(long, default_value = "20")]
+        n_ops: usize,
+
+        /// Wall-clock sleep per op for uniform DAGs, and for the fast branch of
+        /// skewed DAGs (milliseconds).
+        #[arg(long, default_value = "50")]
+        op_duration_ms: u64,
+
+        /// Slow-branch multiplier for skewed DAGs (slow_ms = op_duration_ms * factor).
+        #[arg(long, default_value = "5")]
+        skew_factor: u64,
+
+        /// Value written to the `nodes` field of RunMetrics.
+        /// Set to $SLURM_NNODES in the batch script.
+        #[arg(long, default_value = "1")]
+        nodes: u32,
+
+        /// Append result to this JSON file (rank 0 only).
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 }
 
-// ── DAG builders ─────────────────────────────────────────────────────────────
+#[cfg(feature = "distributed")]
+#[derive(Debug, Clone, ValueEnum)]
+enum MpiDagKind {
+    /// All compute ops have the same cost (Slow(op_duration_ms)).
+    Uniform,
+    /// Alternating slow/fast ops: odd IDs get Slow(op_duration_ms * skew_factor),
+    /// even IDs get Slow(op_duration_ms).  With static scheduling and 2 workers,
+    /// all slow ops land on rank 1 and all fast ops on rank 2.
+    Skewed,
+}
+
+#[cfg(feature = "distributed")]
+#[derive(Debug, Clone, ValueEnum)]
+enum MpiSchedulerKind {
+    Static,
+    #[value(name = "work-stealing")]
+    WorkStealing,
+}
+
+// ── local DAG builders ────────────────────────────────────────────────────────
 
 fn build_uniform_dag(dag_ops: usize, dim: usize) -> (Arc<Dag>, HashMap<usize, Tensor>) {
     let n_src = dag_ops + 1;
     let mut ops: Vec<Op> = (0..n_src)
         .map(|id| Op::new(id, OpKind::Matmul { m: dim, n: dim, k: dim }, vec![], vec![dim, dim]))
         .collect();
-
     let mut prev = 0usize;
     for i in 0..dag_ops {
         let cid = n_src + i;
@@ -80,23 +125,73 @@ fn build_uniform_dag(dag_ops: usize, dim: usize) -> (Arc<Dag>, HashMap<usize, Te
         ops.push(Op::new(cid, OpKind::Matmul { m: dim, n: dim, k: dim }, inputs, vec![dim, dim]));
         prev = cid;
     }
-
-    let dag = Arc::new(Dag::new(ops).expect("uniform dag is acyclic"));
+    let dag = Arc::new(Dag::new(ops).expect("uniform dag is valid"));
     let val = 1.0 / dim as f32;
     let src = (0..n_src).map(|id| (id, Tensor::full(&[dim, dim], val))).collect();
     (dag, src)
 }
 
-fn build_skewed_dag(dag_ops: usize, factor: u64) -> (Arc<Dag>, HashMap<usize, Tensor>) {
+fn build_local_skewed_dag(
+    dag_ops: usize,
+    factor: u64,
+) -> (Arc<Dag>, HashMap<usize, Tensor>) {
     let (dag, src) = Dag::with_skew(dag_ops, factor).expect("skewed dag is valid");
     (Arc::new(dag), src)
 }
 
-// ── Metrics helpers ───────────────────────────────────────────────────────────
+// ── MPI DAG builders ──────────────────────────────────────────────────────────
 
-fn make_run(
+/// Uniform MPI benchmark DAG: one source op + `n_ops` independent `Slow(duration_ms)` ops.
+///
+/// All compute ops fan out from op 0 (the source).  With static scheduling and
+/// `n_workers` workers, each worker gets `n_ops / n_workers` ops — perfectly
+/// balanced.
+#[cfg(feature = "distributed")]
+fn build_mpi_uniform_dag(
+    n_ops: usize,
+    duration_ms: u64,
+) -> (Arc<Dag>, HashMap<usize, Tensor>) {
+    let mut ops = vec![Op::new(0, OpKind::Relu { len: 1 }, vec![], vec![1])];
+    for id in 1..=n_ops {
+        ops.push(Op::new(id, OpKind::Slow { duration_ms }, vec![0], vec![1]));
+    }
+    let dag = Arc::new(Dag::new(ops).expect("mpi uniform dag is valid"));
+    let sources = HashMap::from([(0usize, Tensor::full(&[1], 1.0))]);
+    (dag, sources)
+}
+
+/// Skewed MPI benchmark DAG: one source + `n_ops` independent ops where
+/// **odd-ID ops are slow** (`duration_ms * skew_factor`) and **even-ID ops are fast**
+/// (`duration_ms`).
+///
+/// With static scheduling by `(op_id − 1) % n_workers`:
+/// - `n_workers = 2`: all slow ops → rank 1, all fast ops → rank 2.
+/// - `n_workers = 4`: ranks 1 and 3 are slow, ranks 2 and 4 are fast.
+///
+/// Work-stealing should recover the imbalance by redistributing ops from the
+/// coordinator's global ready queue as workers become idle.
+#[cfg(feature = "distributed")]
+fn build_mpi_skewed_dag(
+    n_ops: usize,
+    duration_ms: u64,
+    skew_factor: u64,
+) -> (Arc<Dag>, HashMap<usize, Tensor>) {
+    let slow_ms = duration_ms * skew_factor;
+    let mut ops = vec![Op::new(0, OpKind::Relu { len: 1 }, vec![], vec![1])];
+    for id in 1..=n_ops {
+        let ms = if id % 2 == 1 { slow_ms } else { duration_ms };
+        ops.push(Op::new(id, OpKind::Slow { duration_ms: ms }, vec![0], vec![1]));
+    }
+    let dag = Arc::new(Dag::new(ops).expect("mpi skewed dag is valid"));
+    let sources = HashMap::from([(0usize, Tensor::full(&[1], 1.0))]);
+    (dag, sources)
+}
+
+// ── shared output helpers ─────────────────────────────────────────────────────
+
+fn make_run_metrics(
     scheduler: &str,
-    dag_kind: &DagKind,
+    skew: bool,
     nodes: u32,
     workers: u32,
     dag_size: usize,
@@ -107,83 +202,10 @@ fn make_run(
         nodes,
         workers_per_node: workers,
         dag_size: dag_size as u32,
-        skew: matches!(dag_kind, DagKind::Skewed),
+        skew,
         metrics: m,
     }
 }
-
-// ── Bench logic ───────────────────────────────────────────────────────────────
-
-async fn run_bench(
-    dag: DagKind,
-    workers: usize,
-    nodes: u32,
-    dag_ops: usize,
-    skew_factor: u64,
-    chain_dim: usize,
-    output: Option<PathBuf>,
-) -> Result<Vec<RunMetrics>> {
-    let (arc_dag, src) = match dag {
-        DagKind::Uniform => build_uniform_dag(dag_ops, chain_dim),
-        DagKind::Skewed => build_skewed_dag(dag_ops, skew_factor),
-    };
-    let dag_size = arc_dag.len();
-    let dag_label = match dag {
-        DagKind::Uniform => "uniform",
-        DagKind::Skewed => "skewed",
-    };
-    let mut results: Vec<RunMetrics> = Vec::new();
-
-    // Sequential
-    let (_, m) = SequentialExecutor::execute(&arc_dag, src.clone())
-        .context("sequential executor failed")?;
-    let r = make_run("sequential", &dag, nodes, 1, dag_size, m);
-    println!("[bench] sequential/{dag_label}: {:.1} ms  ({:.0} ops/s)",
-        r.metrics.elapsed_ms, r.metrics.throughput_ops_per_sec);
-    results.push(r);
-
-    // Static
-    let sched = StaticScheduler::new(&arc_dag, workers);
-    let (_, m) = sched.execute(Arc::clone(&arc_dag), src.clone()).await
-        .context("static scheduler failed")?;
-    let r = make_run("static", &dag, nodes, workers as u32, dag_size, m);
-    println!("[bench] static/{dag_label} ({workers}w): {:.1} ms  ({:.0} ops/s)  idle={:.1}%",
-        r.metrics.elapsed_ms, r.metrics.throughput_ops_per_sec,
-        idle_pct(&r));
-    results.push(r);
-
-    // Work-stealing
-    let sched = WorkStealingScheduler::new(workers);
-    let (_, m) = sched.execute(Arc::clone(&arc_dag), src).await
-        .context("work-stealing scheduler failed")?;
-    let r = make_run("work-stealing", &dag, nodes, workers as u32, dag_size, m);
-    println!("[bench] ws/{dag_label} ({workers}w): {:.1} ms  ({:.0} ops/s)  idle={:.1}%  steals={}/s",
-        r.metrics.elapsed_ms, r.metrics.throughput_ops_per_sec,
-        idle_pct(&r), r.metrics.steal_rate);
-    results.push(r);
-
-    if let Some(path) = output {
-        append_json(&path, &results).with_context(|| format!("writing {}", path.display()))?;
-        println!("[bench] appended {} entries → {}", results.len(), path.display());
-    }
-
-    Ok(results)
-}
-
-fn append_json(path: &PathBuf, new_entries: &[RunMetrics]) -> Result<()> {
-    let mut existing: Vec<RunMetrics> = if path.exists() {
-        let raw = std::fs::read_to_string(path)?;
-        if raw.trim().is_empty() { vec![] } else { serde_json::from_str(&raw)? }
-    } else {
-        vec![]
-    };
-    existing.extend_from_slice(new_entries);
-    let json = serde_json::to_string_pretty(&existing)?;
-    std::fs::write(path, json)?;
-    Ok(())
-}
-
-// ── Report ────────────────────────────────────────────────────────────────────
 
 fn idle_pct(r: &RunMetrics) -> f64 {
     let w = r.workers_per_node.max(1) as f64;
@@ -194,17 +216,16 @@ fn idle_pct(r: &RunMetrics) -> f64 {
 fn print_report(entries: &[RunMetrics]) {
     println!("\n## Scheduler Comparison\n");
     println!(
-        "| {:<13} | {:>5} | {:<7} | {:>14} | {:>6} | {:>10} |",
+        "| {:<16} | {:>5} | {:<7} | {:>14} | {:>6} | {:>10} |",
         "Scheduler", "Nodes", "DAG", "Throughput", "Idle%", "Steal Rate"
     );
-    println!("|{:-<15}|{:-<7}|{:-<9}|{:-<16}|{:-<8}|{:-<12}|", "", "", "", "", "", "");
+    println!("|{:-<18}|{:-<7}|{:-<9}|{:-<16}|{:-<8}|{:-<12}|", "", "", "", "", "", "");
     for r in entries {
-        let dag_label = if r.skew { "skewed" } else { "uniform" };
         println!(
-            "| {:<13} | {:>5} | {:<7} | {:>13.0} /s | {:>5.1}% | {:>9.1}/s |",
+            "| {:<16} | {:>5} | {:<7} | {:>13.0} /s | {:>5.1}% | {:>9.1}/s |",
             r.scheduler,
             r.nodes,
-            dag_label,
+            if r.skew { "skewed" } else { "uniform" },
             r.metrics.throughput_ops_per_sec,
             idle_pct(r),
             r.metrics.steal_rate,
@@ -213,7 +234,145 @@ fn print_report(entries: &[RunMetrics]) {
     println!();
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+fn append_json(path: &PathBuf, new_entries: &[RunMetrics]) -> Result<()> {
+    let mut existing: Vec<RunMetrics> = if path.exists() {
+        let raw = std::fs::read_to_string(path)?;
+        if raw.trim().is_empty() { vec![] } else { serde_json::from_str(&raw)? }
+    } else {
+        vec![]
+    };
+    existing.extend_from_slice(new_entries);
+    std::fs::write(path, serde_json::to_string_pretty(&existing)?)?;
+    Ok(())
+}
+
+// ── subcommand handlers ───────────────────────────────────────────────────────
+
+async fn run_local_bench(
+    dag: LocalDagKind,
+    workers: usize,
+    nodes: u32,
+    dag_ops: usize,
+    skew_factor: u64,
+    chain_dim: usize,
+    output: Option<PathBuf>,
+) -> Result<()> {
+    let (arc_dag, src) = match dag {
+        LocalDagKind::Uniform => build_uniform_dag(dag_ops, chain_dim),
+        LocalDagKind::Skewed => build_local_skewed_dag(dag_ops, skew_factor),
+    };
+    let dag_size = arc_dag.len();
+    let skew = matches!(dag, LocalDagKind::Skewed);
+    let dag_label = if skew { "skewed" } else { "uniform" };
+    let mut results: Vec<RunMetrics> = Vec::new();
+
+    let (_, m) = SequentialExecutor::execute(&arc_dag, src.clone())
+        .context("sequential executor failed")?;
+    let r = make_run_metrics("sequential", skew, nodes, 1, dag_size, m);
+    println!(
+        "[bench] sequential/{dag_label}: {:.1} ms  ({:.0} ops/s)",
+        r.metrics.elapsed_ms, r.metrics.throughput_ops_per_sec
+    );
+    results.push(r);
+
+    let sched = StaticScheduler::new(&arc_dag, workers);
+    let (_, m) = sched
+        .execute(Arc::clone(&arc_dag), src.clone())
+        .await
+        .context("static scheduler failed")?;
+    let r = make_run_metrics("static", skew, nodes, workers as u32, dag_size, m);
+    println!(
+        "[bench] static/{dag_label} ({workers}w): {:.1} ms  ({:.0} ops/s)  idle={:.1}%",
+        r.metrics.elapsed_ms,
+        r.metrics.throughput_ops_per_sec,
+        idle_pct(&r)
+    );
+    results.push(r);
+
+    let sched = WorkStealingScheduler::new(workers);
+    let (_, m) = sched
+        .execute(Arc::clone(&arc_dag), src)
+        .await
+        .context("work-stealing failed")?;
+    let r = make_run_metrics("work-stealing", skew, nodes, workers as u32, dag_size, m);
+    println!(
+        "[bench] ws/{dag_label} ({workers}w): {:.1} ms  ({:.0} ops/s)  idle={:.1}%  steals={:.1}/s",
+        r.metrics.elapsed_ms,
+        r.metrics.throughput_ops_per_sec,
+        idle_pct(&r),
+        r.metrics.steal_rate
+    );
+    results.push(r);
+
+    if let Some(path) = output {
+        append_json(&path, &results)
+            .with_context(|| format!("writing {}", path.display()))?;
+        println!("[bench] appended {} entries → {}", results.len(), path.display());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "distributed")]
+fn run_mpi_bench(
+    dag: MpiDagKind,
+    scheduler: MpiSchedulerKind,
+    n_ops: usize,
+    op_duration_ms: u64,
+    skew_factor: u64,
+    nodes: u32,
+    output: Option<PathBuf>,
+) -> Result<()> {
+    use ferroflow_runtime::{MpiSchedulerMode, MpiWorker};
+
+    let mode = match scheduler {
+        MpiSchedulerKind::Static => MpiSchedulerMode::Static,
+        MpiSchedulerKind::WorkStealing => MpiSchedulerMode::WorkStealing,
+    };
+    let sched_name = match mode {
+        MpiSchedulerMode::Static => "mpi-static",
+        MpiSchedulerMode::WorkStealing => "mpi-work-stealing",
+    };
+    let (arc_dag, sources, skew) = match dag {
+        MpiDagKind::Uniform => {
+            let (d, s) = build_mpi_uniform_dag(n_ops, op_duration_ms);
+            (d, s, false)
+        }
+        MpiDagKind::Skewed => {
+            let (d, s) = build_mpi_skewed_dag(n_ops, op_duration_ms, skew_factor);
+            (d, s, true)
+        }
+    };
+    let dag_size = arc_dag.len();
+
+    match MpiWorker::new(arc_dag, sources).with_mode(mode).run()? {
+        Some((_, metrics)) => {
+            // Only rank 0 reaches here.
+            let run = make_run_metrics(sched_name, skew, nodes, 1, dag_size, metrics);
+            println!(
+                "[mpi-bench] {sched_name}/{}: elapsed={:.1} ms  throughput={:.0} ops/s  \
+                 idle={:.1}%  steal_attempts={}  successful_steals={}  steal_rate={:.1}/s",
+                if skew { "skewed" } else { "uniform" },
+                run.metrics.elapsed_ms,
+                run.metrics.throughput_ops_per_sec,
+                idle_pct(&run),
+                run.metrics.steal_attempts,
+                run.metrics.successful_steals,
+                run.metrics.steal_rate,
+            );
+            if let Some(path) = output {
+                append_json(&path, &[run])
+                    .with_context(|| format!("writing {}", path.display()))?;
+                println!("[mpi-bench] result appended → {}", path.display());
+            }
+        }
+        None => {
+            // Worker ranks exit here.
+        }
+    }
+    Ok(())
+}
+
+// ── entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -222,14 +381,29 @@ async fn main() -> Result<()> {
 
     match args.command {
         Command::Bench { dag, workers, nodes, dag_ops, skew_factor, chain_dim, output } => {
-            run_bench(dag, workers, nodes, dag_ops, skew_factor, chain_dim, output).await?;
+            run_local_bench(dag, workers, nodes, dag_ops, skew_factor, chain_dim, output)
+                .await?;
         }
+
         Command::Report { input } => {
             let raw = std::fs::read_to_string(&input)
                 .with_context(|| format!("reading {}", input.display()))?;
-            let entries: Vec<RunMetrics> = serde_json::from_str(&raw)
-                .context("parsing RunMetrics JSON")?;
+            let entries: Vec<RunMetrics> =
+                serde_json::from_str(&raw).context("parsing RunMetrics JSON")?;
             print_report(&entries);
+        }
+
+        #[cfg(feature = "distributed")]
+        Command::MpiBench {
+            dag,
+            scheduler,
+            n_ops,
+            op_duration_ms,
+            skew_factor,
+            nodes,
+            output,
+        } => {
+            run_mpi_bench(dag, scheduler, n_ops, op_duration_ms, skew_factor, nodes, output)?;
         }
     }
 

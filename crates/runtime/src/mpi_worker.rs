@@ -1,11 +1,28 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use ferroflow_core::{ops::execute_op, Dag, Op, OpId, Tensor};
+use ferroflow_core::{ops::execute_op, Dag, Op, OpId, SchedulerMetrics, Tensor};
 use mpi::traits::*;
 use serde::{Deserialize, Serialize};
+
+// ── scheduler mode ────────────────────────────────────────────────────────────
+
+/// Controls how the coordinator dispatches ready ops to worker ranks.
+///
+/// - `Static`: ops are pre-assigned to workers by `(op_id − 1) % n_workers`.
+///   A worker only receives ops from its own slice; starvation is visible when
+///   one slice is systematically heavier than others.
+/// - `WorkStealing`: any idle worker receives the next available op from the
+///   global ready queue — demand-driven, no pre-assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MpiSchedulerMode {
+    Static,
+    WorkStealing,
+}
+
+// ── message protocol ──────────────────────────────────────────────────────────
 
 /// Messages exchanged over MPI point-to-point between coordinator and workers.
 #[derive(Debug, Serialize, Deserialize)]
@@ -20,41 +37,50 @@ enum MpiMsg {
     OpResult { op_id: OpId, tensor: Tensor },
     /// Coordinator instructs the worker to exit cleanly.
     Shutdown,
+    /// Worker sends its local counters after receiving Shutdown.
+    Metrics { idle_time_ms: f64, steal_attempts: u64, successful_steals: u64 },
 }
 
-/// MPI-backed distributed work-stealing scheduler.
+// ── public API ─────────────────────────────────────────────────────────────────
+
+/// MPI-backed distributed work-stealing (or static) scheduler.
 ///
 /// Rank 0 is the **coordinator**: it owns the [`Dag`], tracks completions,
 /// and dispatches ready ops on demand.  Ranks 1..N are **workers**: they
-/// steal ops via point-to-point MPI, execute them using the local rayon-backed
-/// tensor ops, and report results back to the coordinator.
+/// steal ops via point-to-point MPI, execute them, and report results back.
 ///
 /// All MPI ranks must construct an `MpiWorker` and call [`run`](Self::run)
 /// together — this is the standard SPMD entry point.
 pub struct MpiWorker {
     dag: Arc<Dag>,
     source_tensors: HashMap<OpId, Tensor>,
+    mode: MpiSchedulerMode,
 }
 
 impl MpiWorker {
-    /// Creates a new `MpiWorker` with the given DAG and pre-supplied source tensors.
-    ///
-    /// `source_tensors` must contain an output [`Tensor`] for every source op
-    /// (an op whose `input_ids` is empty).
+    /// Creates a new `MpiWorker` with work-stealing dispatch (default).
     pub fn new(dag: Arc<Dag>, source_tensors: HashMap<OpId, Tensor>) -> Self {
-        Self { dag, source_tensors }
+        Self { dag, source_tensors, mode: MpiSchedulerMode::WorkStealing }
+    }
+
+    /// Overrides the dispatch strategy.
+    pub fn with_mode(mut self, mode: MpiSchedulerMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     /// Runs the distributed DAG execution.
     ///
-    /// Initialises MPI, branches on rank, and returns:
-    /// - `Ok(Some(store))` on rank 0 after the full DAG has completed.
+    /// Returns:
+    /// - `Ok(Some((store, metrics)))` on rank 0 after the full DAG completes.
     /// - `Ok(None)` on all worker ranks once they receive `Shutdown`.
     ///
     /// # Errors
     /// Returns an error if MPI initialisation fails, there are fewer than 2
     /// ranks, or any op execution fails on a worker.
-    pub fn run(self) -> anyhow::Result<Option<HashMap<OpId, Tensor>>> {
+    pub fn run(
+        self,
+    ) -> anyhow::Result<Option<(HashMap<OpId, Tensor>, SchedulerMetrics)>> {
         let universe = mpi::initialize().context("MPI initialisation failed")?;
         let world = universe.world();
         let rank = world.rank();
@@ -66,11 +92,12 @@ impl MpiWorker {
         );
 
         if rank == 0 {
-            let results = coordinator_loop(&world, self.dag, self.source_tensors, n_ranks)
-                .context("coordinator loop failed")?;
-            Ok(Some(results))
+            let (results, metrics) =
+                coordinator_loop(&world, self.dag, self.source_tensors, n_ranks, self.mode)
+                    .context("coordinator loop failed")?;
+            Ok(Some((results, metrics)))
         } else {
-            worker_loop(&world, rank).context("worker loop failed")?;
+            worker_loop(&world, rank, self.mode).context("worker loop failed")?;
             Ok(None)
         }
     }
@@ -99,19 +126,23 @@ fn mpi_recv_from<C: Communicator>(world: &C, source: i32) -> anyhow::Result<MpiM
 
 // ── coordinator (rank 0) ──────────────────────────────────────────────────────
 
+fn worker_for_op(op_id: OpId, n_workers: usize) -> usize {
+    op_id.saturating_sub(1) % n_workers
+}
+
 fn coordinator_loop<C: Communicator>(
     world: &C,
     dag: Arc<Dag>,
     source_tensors: HashMap<OpId, Tensor>,
     n_ranks: usize,
-) -> anyhow::Result<HashMap<OpId, Tensor>> {
+    mode: MpiSchedulerMode,
+) -> anyhow::Result<(HashMap<OpId, Tensor>, SchedulerMetrics)> {
     let n_workers = n_ranks - 1;
     let mut tensor_store = source_tensors;
     let mut completed: HashSet<OpId> = HashSet::new();
     let mut dispatched: HashSet<OpId> = HashSet::new();
     let mut ready_queue: VecDeque<OpId> = VecDeque::new();
 
-    // Source ops (no input_ids) are considered pre-completed.
     for op in &dag.ops {
         if op.input_ids.is_empty() {
             completed.insert(op.id);
@@ -120,25 +151,38 @@ fn coordinator_loop<C: Communicator>(
 
     let total_compute = dag.ops.iter().filter(|op| !op.input_ids.is_empty()).count();
     let mut completed_compute = 0usize;
-    // Ops whose StealGrant has been sent but whose OpResult has not arrived.
     let mut in_flight = 0usize;
 
     enqueue_ready(&dag, &completed, &dispatched, &mut ready_queue);
 
-    // Main event loop — runs until every compute op has reported a result.
+    let t0 = Instant::now();
+
     loop {
         let (msg, source_rank) = mpi_recv_any(world)?;
 
         match msg {
             MpiMsg::StealRequest { .. } => {
-                // Refresh the ready queue with any ops newly unblocked by recent completions.
                 enqueue_ready(&dag, &completed, &dispatched, &mut ready_queue);
 
-                let response = match ready_queue.pop_front() {
+                let worker_idx = (source_rank - 1) as usize;
+
+                let maybe_op_id = match mode {
+                    MpiSchedulerMode::WorkStealing => ready_queue.pop_front(),
+                    MpiSchedulerMode::Static => {
+                        // Find the first op in the ready queue assigned to this worker.
+                        let pos = ready_queue
+                            .iter()
+                            .position(|&id| worker_for_op(id, n_workers) == worker_idx);
+                        pos.and_then(|i| ready_queue.remove(i))
+                    }
+                };
+
+                let response = match maybe_op_id {
                     Some(op_id) => {
                         dispatched.insert(op_id);
                         in_flight += 1;
-                        let op = dag.get_op(op_id).expect("op_id from ready_ops is valid").clone();
+                        let op =
+                            dag.get_op(op_id).expect("op_id from ready_ops is valid").clone();
                         let inputs = op
                             .input_ids
                             .iter()
@@ -167,21 +211,42 @@ fn coordinator_loop<C: Communicator>(
         }
     }
 
-    // All compute ops are done and no ops are in-flight.  Each worker is either
-    // in backoff or has just sent a StealRequest.  Drain them one by one.
+    let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    // Drain remaining StealRequests, send Shutdown, collect per-worker Metrics.
+    let mut agg_idle_ms = 0.0f64;
+    let mut agg_steal_attempts = 0u64;
+    let mut agg_successful_steals = 0u64;
     let mut shut = 0;
+
     while shut < n_workers {
         let (msg, source_rank) = mpi_recv_any(world)?;
         if matches!(msg, MpiMsg::StealRequest { .. }) {
             mpi_send(world, source_rank, &MpiMsg::Shutdown)?;
+            match mpi_recv_from(world, source_rank)? {
+                MpiMsg::Metrics { idle_time_ms, steal_attempts, successful_steals } => {
+                    agg_idle_ms += idle_time_ms;
+                    agg_steal_attempts += steal_attempts;
+                    agg_successful_steals += successful_steals;
+                }
+                _ => {}
+            }
             shut += 1;
         }
     }
 
-    Ok(tensor_store)
+    let metrics = SchedulerMetrics::new(
+        total_compute as u64,
+        total_compute as u64,
+        elapsed_ms,
+        agg_idle_ms,
+        agg_steal_attempts,
+        agg_successful_steals,
+    );
+
+    Ok((tensor_store, metrics))
 }
 
-/// Appends newly ready, un-dispatched ops to `queue`.
 fn enqueue_ready(
     dag: &Dag,
     completed: &HashSet<OpId>,
@@ -197,28 +262,50 @@ fn enqueue_ready(
 
 // ── worker (ranks 1..N) ───────────────────────────────────────────────────────
 
-fn worker_loop<C: Communicator>(world: &C, rank: i32) -> anyhow::Result<()> {
+fn worker_loop<C: Communicator>(
+    world: &C,
+    rank: i32,
+    mode: MpiSchedulerMode,
+) -> anyhow::Result<()> {
     let mut backoff = Duration::from_millis(10);
+    let mut idle_time_ms = 0.0f64;
+    let mut steal_attempts = 0u64;
+    let mut successful_steals = 0u64;
+    let is_ws = mode == MpiSchedulerMode::WorkStealing;
 
     loop {
+        if is_ws {
+            steal_attempts += 1;
+        }
         mpi_send(world, 0, &MpiMsg::StealRequest { rank })?;
 
         match mpi_recv_from(world, 0)? {
             MpiMsg::StealGrant { op_id, op, inputs } => {
                 backoff = Duration::from_millis(10);
+                if is_ws {
+                    successful_steals += 1;
+                }
                 let input_refs: Vec<&Tensor> = inputs.iter().collect();
-                // execute_op may invoke rayon internally for CPU-bound work.
                 let tensor = execute_op(&op, &input_refs)
                     .map_err(|e| anyhow::anyhow!("rank {rank}: op {op_id} failed: {e}"))?;
                 mpi_send(world, 0, &MpiMsg::OpResult { op_id, tensor })?;
             }
 
             MpiMsg::StealNone => {
+                let tw = Instant::now();
                 std::thread::sleep(backoff);
+                idle_time_ms += tw.elapsed().as_secs_f64() * 1000.0;
                 backoff = (backoff * 2).min(Duration::from_millis(100));
             }
 
-            MpiMsg::Shutdown => break,
+            MpiMsg::Shutdown => {
+                mpi_send(world, 0, &MpiMsg::Metrics {
+                    idle_time_ms,
+                    steal_attempts,
+                    successful_steals,
+                })?;
+                break;
+            }
 
             _ => {}
         }
@@ -259,7 +346,6 @@ mod tests {
         let dag = Arc::new(Dag::new(ops).unwrap());
 
         let mut sources = HashMap::new();
-        // op0 = I₂, op1 = A = [[1,2],[3,4]]
         sources.insert(0usize, Tensor::from_shape_vec(&[2, 2], vec![1., 0., 0., 1.]).unwrap());
         sources.insert(1usize, Tensor::from_shape_vec(&[2, 2], vec![1., 2., 3., 4.]).unwrap());
 
@@ -268,14 +354,13 @@ mod tests {
             Err(e) if e.to_string().contains("≥2 MPI ranks") => {}
 
             // Rank 0 with 2+ ranks: verify correctness.
-            Ok(Some(store)) => {
+            Ok(Some((store, _metrics))) => {
                 let op2: Vec<f32> = store[&2].data.iter().copied().collect();
                 assert_eq!(op2, vec![1., 2., 3., 4.], "op2 should be A");
                 let op3: Vec<f32> = store[&3].data.iter().copied().collect();
                 assert_eq!(op3, vec![1., 2., 3., 4.], "op3 should be I·A = A");
             }
 
-            // Worker rank — no return value expected.
             Ok(None) => {}
 
             Err(e) => panic!("unexpected MpiWorker error: {e}"),

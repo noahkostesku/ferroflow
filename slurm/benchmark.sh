@@ -1,9 +1,12 @@
 #!/bin/bash
-# ferroflow multi-configuration benchmark job.
+# ferroflow MPI distributed benchmark job.
 #
-# Runs three schedulers (sequential, static, work-stealing) across four
-# configurations (2-node/4-node × uniform/skewed DAG) and records RunMetrics
-# to docs/benchmark_results.json.  Prints a markdown comparison table when done.
+# Runs static and work-stealing schedulers across four configurations
+# (2-node/4-node × uniform/skewed DAG) using real MPI ranks and records
+# RunMetrics to docs/benchmark_results_mpi.json.  Prints a markdown
+# comparison table when all runs complete.
+#
+# Build requirement: cargo build --release --features distributed
 #
 # Usage:
 #   sbatch slurm/benchmark.sh
@@ -27,7 +30,7 @@ export RAYON_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export CARGO_TARGET_DIR=${SCRATCH}/ferroflow-target
 
 SUBMIT_DIR="${SLURM_SUBMIT_DIR}"
-RESULTS_JSON="${SUBMIT_DIR}/docs/benchmark_results.json"
+RESULTS_JSON="${SUBMIT_DIR}/docs/benchmark_results_mpi.json"
 
 cd "${SUBMIT_DIR}"
 
@@ -39,49 +42,62 @@ echo "================================================================"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
-echo "[ferroflow-bench] building release binary..."
-cargo build --release -j"${SLURM_CPUS_PER_TASK}" 2>&1 | tail -5
+echo "[ferroflow-bench] building release binary (--features distributed)..."
+cargo build --release --features distributed -j"${SLURM_CPUS_PER_TASK}" 2>&1 | tail -5
 
 BINARY="${CARGO_TARGET_DIR}/release/ferroflow"
 echo "[ferroflow-bench] binary: ${BINARY}"
 
-# ── Configurations ────────────────────────────────────────────────────────────
-# Each entry: "NODES DAG_KIND"
-# NODES is used for both --workers and --nodes so the RunMetrics records the
-# simulated node count.  (Full MPI distribution pending Week 2 Narval runs.)
+# ── MPI benchmark parameters ──────────────────────────────────────────────────
 
-CONFIGS=(
-    "2 uniform"
-    "2 skewed"
-    "4 uniform"
-    "4 skewed"
-)
+N_OPS=20
+OP_DURATION_MS=50   # wall-clock ms per op on the fast branch
+SKEW_FACTOR=5       # slow branch = 50 ms * 5 = 250 ms per op
 
-DAG_OPS=20
-SKEW_FACTOR=5
-CHAIN_DIM=128
-
-echo ""
-echo "── Benchmark runs ──────────────────────────────────────────────"
-
-for config in "${CONFIGS[@]}"; do
-    N_NODES=$(echo "${config}" | awk '{print $1}')
-    DAG_KIND=$(echo "${config}" | awk '{print $2}')
+# ── Helper: run one srun invocation ──────────────────────────────────────────
+# Usage: run_mpi_bench <n_nodes> <dag_kind> <scheduler>
+run_mpi_bench() {
+    local n_nodes=$1
+    local dag_kind=$2
+    local scheduler=$3
 
     echo ""
-    echo "[ferroflow-bench] config: ${N_NODES} nodes / ${DAG_KIND} DAG"
+    echo "[ferroflow-bench] srun: ${n_nodes} nodes / ${dag_kind} DAG / ${scheduler}"
 
-    "${BINARY}" bench \
-        --dag         "${DAG_KIND}" \
-        --workers     "${N_NODES}" \
-        --nodes       "${N_NODES}" \
-        --dag-ops     "${DAG_OPS}" \
-        --skew-factor "${SKEW_FACTOR}" \
-        --chain-dim   "${CHAIN_DIM}" \
-        --output      "${RESULTS_JSON}"
+    srun \
+        --nodes="${n_nodes}" \
+        --ntasks="${n_nodes}" \
+        --ntasks-per-node=1 \
+        "${BINARY}" mpi-bench \
+            --dag           "${dag_kind}" \
+            --scheduler     "${scheduler}" \
+            --n-ops         "${N_OPS}" \
+            --op-duration-ms "${OP_DURATION_MS}" \
+            --skew-factor   "${SKEW_FACTOR}" \
+            --nodes         "${n_nodes}" \
+            --output        "${RESULTS_JSON}"
 
-    echo "[ferroflow-bench] config ${N_NODES}n/${DAG_KIND} done"
-done
+    echo "[ferroflow-bench] done: ${n_nodes}n/${dag_kind}/${scheduler}"
+}
+
+echo ""
+echo "── MPI benchmark runs ──────────────────────────────────────────"
+
+# Config 1: 2 nodes, uniform DAG — static then work-stealing
+run_mpi_bench 2 uniform static
+run_mpi_bench 2 uniform work-stealing
+
+# Config 2: 2 nodes, skewed DAG — static then work-stealing
+run_mpi_bench 2 skewed static
+run_mpi_bench 2 skewed work-stealing
+
+# Config 3: 4 nodes, uniform DAG — static then work-stealing
+run_mpi_bench 4 uniform static
+run_mpi_bench 4 uniform work-stealing
+
+# Config 4: 4 nodes, skewed DAG — static then work-stealing
+run_mpi_bench 4 skewed static
+run_mpi_bench 4 skewed work-stealing
 
 echo ""
 echo "── Comparison table ────────────────────────────────────────────"
@@ -96,14 +112,14 @@ cat >> "${SUBMIT_DIR}/docs/benchmarks.md" <<EOF
 
 ---
 
-### ${FINISH} — Narval multi-node benchmark (job ${SLURM_JOB_ID})
+### ${FINISH} — Narval MPI distributed benchmark (job ${SLURM_JOB_ID})
 
 - **Machine:** Narval (Alliance Canada)  |  **Job:** ${SLURM_JOB_ID}
 - **Nodes allocated:** ${SLURM_NNODES}  |  **CPUs/task:** ${SLURM_CPUS_PER_TASK}
 - **Commit:** ${GIT_SHA}
-- **DAG:** ${DAG_OPS}-op uniform (128×128 matmul) and skewed (Slow × ${SKEW_FACTOR})
-- **Configs tested:** 2-node and 4-node worker counts
-- **Full RunMetrics:** \`docs/benchmark_results.json\`
+- **DAG:** ${N_OPS}-op uniform (Slow(${OP_DURATION_MS} ms)) and skewed (Slow × ${SKEW_FACTOR})
+- **Configs tested:** 2-node and 4-node × static and work-stealing
+- **Full RunMetrics:** \`docs/benchmark_results_mpi.json\`
 
 $(${BINARY} report "${RESULTS_JSON}" 2>/dev/null)
 EOF

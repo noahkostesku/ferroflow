@@ -13,4 +13,4 @@ pub use work_stealing::WorkStealingScheduler;
 pub use worker::{Message, WorkQueue, WorkerId, WorkerTrait};
 
 #[cfg(feature = "distributed")]
-pub use mpi_worker::MpiWorker;
+pub use mpi_worker::{MpiSchedulerMode, MpiWorker};

@@ -163,3 +163,16 @@ _Full multi-node scaling results (4 / 8 / 16 / 32 nodes) pending Narval runs._
 | sequential    |     4 | skewed  |           327 /s |   0.0% |       0.0/s |
 | static        |     4 | skewed  |          1151 /s |   0.0% |       0.0/s |
 | work-stealing |     4 | skewed  |          1152 /s |  11.6% |       0.0/s |
+
+## Scheduler Comparison
+
+| Scheduler        | Nodes | DAG     |     Throughput   |  Idle% | Steal Rate  |
+|------------------|-------|---------|------------------|--------|-------------|
+| mpi-static       |     2 | uniform |            20 /s |   0.0% |       0.0/s |
+| mpi-work-stealing|     2 | uniform |            20 /s |   0.0% |      19.9/s |
+| mpi-static       |     2 | skewed  |             7 /s |   0.0% |       0.0/s |
+| mpi-work-stealing|     2 | skewed  |             7 /s |   0.0% |       6.7/s |
+| mpi-static       |     4 | uniform |            56 /s |  22.5% |       0.0/s |
+| mpi-work-stealing|     4 | uniform |            56 /s |  22.6% |      56.3/s |
+| mpi-static       |     4 | skewed  |            17 /s |  43.3% |       0.0/s |
+| mpi-work-stealing|     4 | skewed  |            18 /s |  45.2% |      18.1/s |
