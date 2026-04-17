@@ -1,0 +1,9 @@
+[package]
+name    = "ferroflow-onnx"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tract-onnx       = "0.21"
+ferroflow-core   = { workspace = true }
+anyhow           = { workspace = true }

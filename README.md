@@ -1,87 +1,266 @@
 # ferroflow
 
-Distributed **tensor DAG** execution and scheduling experiments: compare **static** partitioning vs **work-stealing** when operator costs are uneven (“skew”). The primary target environment is **[Narval](https://docs.alliancecan.ca/wiki/Narval)** (Alliance Canada); local development uses a single-process runtime and Criterion benchmarks.
+A distributed **tensor DAG** scheduler that compares **work-stealing** against **static round-robin partitioning** on skewed workloads. The research target is [Narval](https://docs.alliancecan.ca/wiki/Narval) (Alliance Canada HPC cluster); all schedulers run locally too, with no cluster required.
 
-> **Status:** active research codebase — see [`docs/progress.md`](docs/progress.md) for what is implemented vs planned.
+> **Status:** active research codebase — implementation and benchmarks are in progress. See [`docs/progress.md`](docs/progress.md) for the current milestone checklist.
 
-## What exists today
+---
 
-- **`ferroflow-core`** — `Tensor` helpers, tensor ops (`matmul`, `relu`, `layer_norm`, `reduce`), `Dag` + `Op` model, topological order and ready-set logic.
-- **`ferroflow-runtime`** — sequential execution, static round-robin scheduling, work-stealing scheduler (local / async prototype), Criterion DAG benchmarks.
-- **Root binary** — `ferroflow` CLI (scheduler flags; full DAG-from-file workflow is still evolving).
-- **`mpi-hello`** — small MPI sanity check, **excluded** from the Cargo workspace (`Cargo.toml` `exclude`) so local `cargo build` does not require an MPI toolchain.
+## Motivation
 
-MPI-backed multi-node execution and SLURM job templates are documented in [`docs/narval-setup.md`](docs/narval-setup.md) and [`docs/architecture.md`](docs/architecture.md); treat those as the source of truth for the next milestones.
+Real tensor workloads (transformer layers, graph neural networks) have highly variable per-operator cost. A static round-robin partitioner assigns the same number of ops to each rank; if a few ops are 10× heavier than the rest, most workers sit idle while a single rank falls behind. Work-stealing lets idle workers pull ops from overloaded peers, recovering the imbalance without any up-front cost model.
 
-## Requirements
+ferroflow provides a clean, instrumented testbed for measuring this effect at scale: the same DAG can be run under sequential, static, and work-stealing scheduling, and the resulting `RunMetrics` (throughput, idle%, steal rate) are logged to a JSON file for comparison.
 
-| Item | Notes |
-|------|--------|
-| **Rust** | `1.74+` recommended (project uses **Edition 2021**); pin your own `rust-toolchain.toml` if you need reproducibility. |
-| **MPI** | Optional until you enable the `distributed` feature on `ferroflow-runtime` / `ferroflow-core`. Use your site’s MPI module (e.g. on Narval: `<YOUR_PREREQ_MODULE>`, `<YOUR_OPENMPI_OR_INTEL_MPI_MODULE>` — replace with cluster docs). |
+---
 
-## Quick start (local)
+## What is implemented
 
-```bash
-git clone <YOUR_REPO_URL>
-cd ferroflow
+| Crate | Contents |
+|-------|---------|
+| **`ferroflow-core`** | `Tensor` (ndarray-backed f32), tensor ops (`matmul`, `relu`, `layer_norm`, `reduce`, `slow`), `Dag` + `Op` + `OpKind`, topological sort, `SchedulerMetrics` / `RunMetrics` with serde |
+| **`ferroflow-runtime`** | `SequentialExecutor`, `StaticScheduler` (round-robin), `WorkStealingScheduler` (tokio, pull-based), `MpiWorker` (rank-0 coordinator + worker ranks, bincode messages, exponential backoff) |
+| **`ferroflow-onnx`** | ONNX model import: `parse_onnx` maps MatMul/Gemm → `Matmul`, Relu → `Relu`, LayerNormalization → `LayerNorm`, ReduceMean/GlobalAveragePool → `Reduce`; `load_model` returns a ready-to-execute source tensor map; `dag_summary` prints op/edge/type breakdown |
+| **`ferroflow-python`** | PyO3 bindings: `DAG` builder class + `run()` function that blocks on `WorkStealingScheduler` |
+| **`ferroflow` binary** | CLI with `bench`, `report`, `info`, `run` subcommands (see below) |
 
-# Build workspace (root crate + crates/core + crates/runtime)
-cargo build --release
-
-cargo test
-cargo bench -p ferroflow-runtime
-```
-
-If `cargo bench` OOMs on a small machine, try lower parallelism, e.g. `cargo bench -p ferroflow-runtime -j 2`.
-
-### Optional: MPI / `distributed` feature
-
-```bash
-# After loading MPI in your environment (see docs/narval-setup.md)
-cargo test -p ferroflow-runtime --features distributed
-```
+---
 
 ## Repository layout
 
 ```
 ferroflow/
 ├── crates/
-│   ├── core/       # DAG, ops, tensors
-│   └── runtime/    # executors, schedulers, benches
-├── docs/           # architecture, progress, benchmarks, Narval notes
-├── mpi-hello/      # standalone MPI smoke test (workspace exclude)
-├── slurm/          # example job scripts (placeholders / site-specific)
-└── src/            # ferroflow binary
+│   ├── core/        # Tensor, Op, Dag, metrics
+│   ├── runtime/     # Executors, schedulers, Criterion benches
+│   ├── onnx/        # ONNX model import (tract-onnx)
+│   └── python/      # PyO3 bindings (maturin)
+├── docs/
+│   ├── architecture.md    # Coordinator/worker design, MPI protocol
+│   ├── progress.md        # Session-by-session milestone checklist
+│   ├── benchmarks.md      # Dated, commit-tagged benchmark log
+│   └── narval-setup.md    # Cluster environment and job hints
+├── models/          # ONNX model files (generated, not committed)
+├── scripts/
+│   └── export_mlp.py      # PyTorch → ONNX export helper
+├── slurm/           # SLURM job scripts
+├── mpi-hello/       # Standalone MPI smoke test (workspace-excluded)
+└── src/main.rs      # ferroflow binary entry point
 ```
 
-## Benchmarks
+---
 
-Results and methodology live in [`docs/benchmarks.md`](docs/benchmarks.md). Re-run locally after changes:
+## Requirements
+
+| Requirement | Notes |
+|-------------|-------|
+| **Rust 1.74+** | Edition 2021. A `rust-toolchain.toml` can pin the exact version. |
+| **Python 3.9+** | Only needed for `scripts/export_mlp.py` and the PyO3 bindings (`maturin develop`). |
+| **MPI** | Optional — only needed when building with `--features distributed`. On Narval: `module load StdEnv/2023 llvm openmpi rust/1.91.0`. |
+
+All other dependencies are pulled from crates.io and managed by Cargo.
+
+---
+
+## Quick start (local, no MPI)
 
 ```bash
-cargo bench -p ferroflow-runtime
+git clone https://github.com/your-org/ferroflow
+cd ferroflow
+
+cargo build --release
+cargo test --workspace
 ```
 
-## Running on Narval (placeholder checklist)
+If `cargo bench` OOMs on a memory-constrained machine, pass `-j 2` to limit parallel build jobs:
 
-1. SSH: `ssh <YOUR_USER>@narval.alliancecan.ca` (or your site’s login host).
-2. Clone this repo under `$PROJECT` (e.g. `$SCRATCH/ferroflow`).
-3. Load compiler + MPI modules per [`docs/narval-setup.md`](docs/narval-setup.md).
-4. Submit a job: `sbatch slurm/<YOUR_JOB_SCRIPT>.sh` (adjust account, partition, and walltime in the script).
+```bash
+cargo bench -p ferroflow-runtime -- -j 2
+```
 
-Replace angle-bracket placeholders with your Alliance username, project allocation, and module names from current cluster documentation.
+---
+
+## CLI reference
+
+All subcommands accept `--help`.
+
+### `ferroflow bench` — run local schedulers on a synthetic DAG
+
+```bash
+# Uniform 20-op chain, 4 workers, save results to JSON
+ferroflow bench --dag uniform --workers 4 --output results.json
+
+# Skewed fan-out (half ops 5× slower), 8 workers
+ferroflow bench --dag skewed --workers 8 --skew-factor 5
+```
+
+Options: `--dag uniform|skewed`, `--workers N`, `--nodes N` (metadata only), `--dag-ops N`, `--skew-factor N`, `--chain-dim N`, `--output PATH`.
+
+### `ferroflow report` — render a RunMetrics JSON file as a table
+
+```bash
+ferroflow report docs/benchmark_results.json
+```
+
+### `ferroflow info` — print the DAG summary for an ONNX model
+
+```bash
+ferroflow info --model models/mlp.onnx
+# 12 ops (7 sources, 5 compute), 8 edges
+#   matmul: 3
+#   relu: 2
+```
+
+### `ferroflow run` — execute an ONNX model and print RunMetrics
+
+```bash
+ferroflow run --model models/mlp.onnx --workers 4
+ferroflow run --model models/mlp.onnx --workers 4 --scheduler static
+ferroflow run --model models/mlp.onnx --workers 1 --scheduler sequential
+```
+
+Options: `--model PATH`, `--workers N`, `--scheduler sequential|static|work-stealing`.
+
+---
+
+## ONNX workflow
+
+Export any compatible PyTorch model with the provided helper, then run it through ferroflow:
+
+```bash
+# 1. Export (requires torch + onnxscript)
+pip install torch onnxscript
+python scripts/export_mlp.py        # writes models/mlp.onnx
+
+# 2. Inspect the DAG
+ferroflow info --model models/mlp.onnx
+
+# 3. Execute and see scheduling metrics
+ferroflow run --model models/mlp.onnx --workers 4
+```
+
+**Supported ONNX ops:** `MatMul`, `Gemm` (bias dropped, `transB` handled), `Relu`, `LayerNormalization` (scale/bias dropped), `ReduceMean`, `GlobalAveragePool`. Unsupported ops return a clear error naming the op type.
+
+Execution uses zero-filled source tensors so any correctly-shaped model runs without real weights. The goal is scheduler characterisation, not numerical inference.
+
+---
+
+## Python bindings
+
+```bash
+cd ferroflow
+maturin develop -m crates/python/Cargo.toml
+```
+
+```python
+import ferroflow
+
+dag = ferroflow.DAG()
+src = dag.matmul(input_ids=[], shape=[128, 128])   # source tensor
+h1  = dag.relu(input_ids=[src], shape=[128, 128])  # relu
+out = dag.matmul(input_ids=[h1], shape=[128, 128]) # matmul
+
+# Returns dict[int, list[float]]: op_id → output tensor (flat)
+results = ferroflow.run(dag, workers=4)
+print(f"output shape hint: {len(results[out])} elements")
+```
+
+`run()` returns a `dict` mapping each op ID to its output tensor as a flat `list[float]`. Source ops (empty `input_ids`) are pre-populated with ones tensors.
+
+---
+
+## Benchmark results
+
+Full methodology and per-run notes are in [`docs/benchmarks.md`](docs/benchmarks.md). Key highlights from local (Apple M-series) runs:
+
+### Local single-node (4 workers)
+
+| Scheduler | DAG | Throughput | Idle% |
+|-----------|-----|-----------|-------|
+| sequential | uniform 20-op chain | 17 145 ops/s | 0% |
+| static | uniform | 14 099 ops/s | 64% |
+| work-stealing | uniform | 16 087 ops/s | 66% |
+| sequential | skewed (5× slow branch) | 268 ops/s | 0% |
+| static | skewed | 935 ops/s | 0% |
+| work-stealing | skewed | 935 ops/s | 12% |
+
+**Uniform chain:** all three schedulers are within ~30% of each other because the chain is inherently serial — no parallelism is possible. Static/WS overhead is visible but expected.
+
+**Skewed fan-out:** both parallel schedulers achieve **~3.5× speedup** over sequential. Work-stealing and static tie here because round-robin already distributes the skewed ops across all 4 workers on this small DAG. The benefit of stealing over static becomes significant at larger scales where imbalance can't be anticipated.
+
+### Narval multi-node (via MPI, Narval job 59471496)
+
+| Scheduler | Nodes | DAG | Throughput | Idle% |
+|-----------|-------|-----|-----------|-------|
+| mpi-static | 2 | uniform | 20 ops/s | 0% |
+| mpi-work-stealing | 2 | uniform | 20 ops/s | 0% |
+| mpi-static | 4 | skewed | 17 ops/s | 43% |
+| mpi-work-stealing | 4 | skewed | 18 ops/s | 45% |
+
+Multi-node results are preliminary (small synthetic DAG, `Slow` ops). Full scaling runs (4 → 256 nodes, larger tensor workloads) are planned.
+
+---
+
+## Running on Narval
+
+```bash
+# 1. Log in and clone under $PROJECT
+ssh <user>@narval.alliancecan.ca
+cd $PROJECT && git clone <repo> ferroflow && cd ferroflow
+
+# 2. Load the working module stack (verified April 2026)
+module load StdEnv/2023 llvm openmpi rust/1.91.0
+export LD_LIBRARY_PATH=/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-64-v3/Compiler/llvm21/openmpi/5.0.8/lib:$LD_LIBRARY_PATH
+
+# 3. Build with MPI support
+cargo build --release --features distributed
+
+# 4. Submit a benchmark job (edit account/time limits first)
+sbatch slurm/ferroflow.sh
+squeue -u $USER
+seff <job_id>     # check CPU/memory efficiency after completion
+```
+
+See [`docs/narval-setup.md`](docs/narval-setup.md) for full environment notes and allocation guidance.
+
+---
+
+## Architecture overview
+
+The system is split into a **coordinator** (MPI rank 0) and **worker ranks** (ranks 1..N):
+
+1. Coordinator holds the `Dag`, maintains a global ready queue, and responds to steal requests from workers.
+2. Workers loop: send `STEAL_REQUEST` → receive `STEAL_GRANT(op)` or `STEAL_NONE` → execute op locally (rayon thread pool) → send `OP_COMPLETE` back.
+3. On `OP_COMPLETE`, coordinator marks the op done, checks for newly-ready successors, and enqueues them.
+
+Intra-node parallelism uses `rayon`; async coordination and networking use `tokio`; MPI point-to-point uses `rsmpi` (wrapped in `spawn_blocking` to avoid blocking the tokio thread pool).
+
+See [`docs/architecture.md`](docs/architecture.md) for the full design.
+
+---
+
+## Development notes
+
+- **No `unwrap`/`expect` in library code.** Allowed only in `tests/`, `benches/`, and `src/main.rs`.
+- **All public API items must have `///` doc comments.** Run `cargo doc --no-deps` to check.
+- **Clippy is enforced.** The CI target is `clippy -D warnings`.
+- **SLURM scripts live in `slurm/`.** Never scatter job scripts across the repo; never hardcode node counts (use `$SLURM_NNODES`).
+- See [`CLAUDE.md`](CLAUDE.md) for the full contributor/agent orientation, including the session-start checklist.
+
+---
 
 ## Documentation
 
-| Doc | Purpose |
-|-----|---------|
-| [`docs/architecture.md`](docs/architecture.md) | Intended multi-node design (coordinator, workers, messages). |
-| [`docs/progress.md`](docs/progress.md) | Milestones and checkboxes. |
-| [`docs/benchmarks.md`](docs/benchmarks.md) | Dated benchmark log. |
-| [`docs/narval-setup.md`](docs/narval-setup.md) | Environment and job hints for Narval. |
-| [`CLAUDE.md`](CLAUDE.md) | Contributor / agent orientation for this repo. |
+| File | Purpose |
+|------|---------|
+| [`docs/architecture.md`](docs/architecture.md) | Coordinator/worker design and MPI protocol |
+| [`docs/progress.md`](docs/progress.md) | Session-by-session milestone checklist |
+| [`docs/benchmarks.md`](docs/benchmarks.md) | Dated, commit-tagged benchmark log |
+| [`docs/narval-setup.md`](docs/narval-setup.md) | Cluster environment, module stack, job hints |
+| [`CLAUDE.md`](CLAUDE.md) | Contributor and AI-agent orientation |
+
+---
 
 ## License
 
-**TBD** — add a `LICENSE` file (e.g. MIT or Apache-2.0) when you are ready to publish terms.
+Not yet decided. A `LICENSE` file (MIT or Apache-2.0) will be added before the first public release.

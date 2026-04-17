@@ -2,7 +2,7 @@
 
 > Check this file at the start of every session to orient on current status.
 
-Last updated: 2026-04-17 (Week 4 Session 1)
+Last updated: 2026-04-17 (Week 4 Session 2)
 
 ---
 
@@ -59,6 +59,10 @@ _Target: 2026-05-04_
 ## Week 4 — Polish, CLI, README, Optional PyO3 Bindings
 _Target: 2026-05-11_
 
+- [x] ONNX model import: `crates/onnx` (`ferroflow-onnx`) — `parse_onnx`, `load_model`, `dag_summary`; maps MatMul/Gemm→Matmul, Relu, LayerNorm, Reduce; transB weight transposition; 4 unit tests
+- [x] CLI extended: `ferroflow info --model <path>` (dag_summary) and `ferroflow run --model <path> --workers <n> --scheduler <seq|static|work-stealing>`
+- [x] `scripts/export_mlp.py` exports a 784→256→128→10 MLP; `models/mlp.onnx` verified
+- [x] End-to-end: `ferroflow info` prints 12 ops / 5 compute / 8 edges; `ferroflow run --workers 4` executes and prints RunMetrics; 37/37 tests pass
 - [ ] CLI (`src/main.rs`): accept DAG spec file, node count, scheduler type
 - [ ] DAG spec file format (JSON or TOML)
 - [ ] README.md with project description, build instructions, benchmark summary

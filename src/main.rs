@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use ferroflow_core::{Dag, Op, OpKind, RunMetrics, SchedulerMetrics, Tensor};
+use ferroflow_onnx::{dag_summary, load_model};
 use ferroflow_runtime::{SequentialExecutor, StaticScheduler, WorkStealingScheduler};
 
 // ── CLI types ─────────────────────────────────────────────────────────────────
@@ -13,6 +14,14 @@ use ferroflow_runtime::{SequentialExecutor, StaticScheduler, WorkStealingSchedul
 enum LocalDagKind {
     Uniform,
     Skewed,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum OnnxScheduler {
+    Sequential,
+    Static,
+    #[value(name = "work-stealing")]
+    WorkStealing,
 }
 
 /// ferroflow — distributed work-stealing tensor computation scheduler
@@ -49,6 +58,26 @@ enum Command {
     /// Print a markdown comparison table from a saved RunMetrics JSON file.
     Report {
         input: PathBuf,
+    },
+
+    /// Print the DAG summary for an ONNX model (op count, edge count, type breakdown).
+    Info {
+        /// Path to the ONNX model file.
+        #[arg(long)]
+        model: PathBuf,
+    },
+
+    /// Execute an ONNX model with the work-stealing scheduler and print RunMetrics.
+    Run {
+        /// Path to the ONNX model file.
+        #[arg(long)]
+        model: PathBuf,
+        /// Number of worker threads.
+        #[arg(long, default_value = "4")]
+        workers: usize,
+        /// Scheduling strategy.
+        #[arg(long, default_value = "work-stealing")]
+        scheduler: OnnxScheduler,
     },
 
     /// Run the MPI distributed scheduler across all MPI ranks.
@@ -372,6 +401,65 @@ fn run_mpi_bench(
     Ok(())
 }
 
+// ── ONNX subcommand handlers ──────────────────────────────────────────────────
+
+fn run_info(model: &PathBuf) -> Result<()> {
+    let dag = ferroflow_onnx::parse_onnx(model)
+        .with_context(|| format!("parsing {}", model.display()))?;
+    println!("{}", dag_summary(&dag));
+    Ok(())
+}
+
+async fn run_model(model: &PathBuf, workers: usize, scheduler: OnnxScheduler) -> Result<()> {
+    let (arc_dag, sources) = load_model(model)
+        .with_context(|| format!("loading {}", model.display()))?;
+    let dag_size = arc_dag.len();
+    let arc_dag = std::sync::Arc::new(arc_dag);
+
+    println!("{}", dag_summary(&arc_dag));
+
+    let (sched_name, m) = match scheduler {
+        OnnxScheduler::Sequential => {
+            let (_, m) = SequentialExecutor::execute(&arc_dag, sources)
+                .context("sequential executor failed")?;
+            ("sequential", m)
+        }
+        OnnxScheduler::Static => {
+            let sched = StaticScheduler::new(&arc_dag, workers);
+            let (_, m) = sched
+                .execute(std::sync::Arc::clone(&arc_dag), sources)
+                .await
+                .context("static scheduler failed")?;
+            ("static", m)
+        }
+        OnnxScheduler::WorkStealing => {
+            let sched = WorkStealingScheduler::new(workers);
+            let (_, m) = sched
+                .execute(std::sync::Arc::clone(&arc_dag), sources)
+                .await
+                .context("work-stealing scheduler failed")?;
+            ("work-stealing", m)
+        }
+    };
+
+    let run = RunMetrics {
+        scheduler: sched_name.to_string(),
+        nodes: 1,
+        workers_per_node: workers as u32,
+        dag_size: dag_size as u32,
+        skew: false,
+        metrics: m,
+    };
+    println!(
+        "[run] {sched_name} ({workers}w): {:.1} ms  {:.0} ops/s  idle={:.1}%  steals={:.1}/s",
+        run.metrics.elapsed_ms,
+        run.metrics.throughput_ops_per_sec,
+        idle_pct(&run),
+        run.metrics.steal_rate,
+    );
+    Ok(())
+}
+
 // ── entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -391,6 +479,14 @@ async fn main() -> Result<()> {
             let entries: Vec<RunMetrics> =
                 serde_json::from_str(&raw).context("parsing RunMetrics JSON")?;
             print_report(&entries);
+        }
+
+        Command::Info { model } => {
+            run_info(&model)?;
+        }
+
+        Command::Run { model, workers, scheduler } => {
+            run_model(&model, workers, scheduler).await?;
         }
 
         #[cfg(feature = "distributed")]
