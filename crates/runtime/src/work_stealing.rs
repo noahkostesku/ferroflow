@@ -107,7 +107,31 @@ impl WorkStealingScheduler {
 
         let t0 = Instant::now();
 
-        // Background metrics ticker.
+        // Wrap in Arc so both the ticker and the post-completion final send can use it.
+        let metrics_tx = Arc::new(metrics_tx);
+
+        // Helper closure: snapshot current atomic state into a LiveMetrics.
+        let snapshot = |elapsed: f64| LiveMetrics {
+            workers: (0..n)
+                .map(|i| WorkerLiveSnapshot {
+                    id: i,
+                    ops_completed: worker_ops[i].load(Ordering::Relaxed),
+                    idle_us: worker_idle_us[i].load(Ordering::Relaxed),
+                    status: match worker_status[i].load(Ordering::Relaxed) {
+                        STATUS_EXEC => WorkerLiveStatus::Executing,
+                        STATUS_STEAL => WorkerLiveStatus::Stealing,
+                        _ => WorkerLiveStatus::Idle,
+                    },
+                })
+                .collect(),
+            total_ops,
+            completed_ops: completed.load(Ordering::Relaxed),
+            elapsed_secs: elapsed,
+            steal_attempts: steal_attempts.load(Ordering::Relaxed),
+            successful_steals: successful_steals.load(Ordering::Relaxed),
+        };
+
+        // Background metrics ticker — fires every 50 ms.
         let ticker = {
             let completed_t = Arc::clone(&completed);
             let steal_attempts_t = Arc::clone(&steal_attempts);
@@ -115,17 +139,13 @@ impl WorkStealingScheduler {
             let worker_ops_t = Arc::clone(&worker_ops);
             let worker_status_t = Arc::clone(&worker_status);
             let worker_idle_us_t = Arc::clone(&worker_idle_us);
+            let tx = Arc::clone(&metrics_tx);
 
             tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(Duration::from_millis(100));
-                interval
-                    .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut interval = tokio::time::interval(Duration::from_millis(50));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     interval.tick().await;
-                    let cmp = completed_t.load(Ordering::Relaxed);
-                    let sa = steal_attempts_t.load(Ordering::Relaxed);
-                    let ss = successful_steals_t.load(Ordering::Relaxed);
                     let elapsed = t0.elapsed().as_secs_f64();
                     let workers = (0..n)
                         .map(|i| WorkerLiveSnapshot {
@@ -142,12 +162,12 @@ impl WorkStealingScheduler {
                     let live = LiveMetrics {
                         workers,
                         total_ops,
-                        completed_ops: cmp,
+                        completed_ops: completed_t.load(Ordering::Relaxed),
                         elapsed_secs: elapsed,
-                        steal_attempts: sa,
-                        successful_steals: ss,
+                        steal_attempts: steal_attempts_t.load(Ordering::Relaxed),
+                        successful_steals: successful_steals_t.load(Ordering::Relaxed),
                     };
-                    if metrics_tx.send(live).is_err() {
+                    if tx.send(live).is_err() {
                         break;
                     }
                 }
@@ -267,6 +287,10 @@ impl WorkStealingScheduler {
         for handle in handles {
             handle.await.expect("worker task panicked")?;
         }
+
+        // Send one final snapshot so the TUI sees the completed state regardless
+        // of whether the 50 ms ticker managed to fire during execution.
+        let _ = metrics_tx.send(snapshot(t0.elapsed().as_secs_f64()));
 
         ticker.abort();
 

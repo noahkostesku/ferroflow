@@ -59,17 +59,27 @@ fn draw_workers(frame: &mut Frame<'_>, state: &DashboardState, area: Rect) {
         .constraints(constraints)
         .split(inner);
 
-    let max_ops = state.workers.iter().map(|w| w.ops_completed).max().unwrap_or(1).max(1);
+    let all_done = state.progress() >= 1.0;
+    // Denominator: share of total ops each worker would hold if balanced.
+    let per_worker_share = if state.workers.is_empty() || state.total_ops == 0 {
+        1.0
+    } else {
+        (state.total_ops as f64 / state.workers.len() as f64).max(1.0)
+    };
 
     for (i, worker) in state.workers.iter().enumerate() {
         if i >= chunks.len() {
             break;
         }
-        let ratio = (worker.ops_completed as f64 / max_ops as f64).clamp(0.0, 1.0);
-        let bar_color = match worker.status {
-            crate::state::WorkerStatus::Executing => Color::Green,
-            crate::state::WorkerStatus::Stealing => Color::Yellow,
-            crate::state::WorkerStatus::Idle => Color::DarkGray,
+        let ratio = (worker.ops_completed as f64 / per_worker_share).clamp(0.0, 1.0);
+        let bar_color = if all_done {
+            Color::Cyan
+        } else {
+            match worker.status {
+                crate::state::WorkerStatus::Executing => Color::Green,
+                crate::state::WorkerStatus::Stealing => Color::Yellow,
+                crate::state::WorkerStatus::Idle => Color::Blue,
+            }
         };
         let label = format!(
             "W{} {} {:4} ops",

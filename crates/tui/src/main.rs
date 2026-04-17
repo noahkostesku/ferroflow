@@ -27,11 +27,11 @@ struct Args {
     workers: usize,
 
     /// Number of ops per branch in the skewed DAG (must be even, ≥ 2).
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 40)]
     dag_size: usize,
 
-    /// Slow-branch multiplier for skew injection.
-    #[arg(long, default_value_t = 10)]
+    /// Slow-branch sleep in ms per op (100 → ~2.5 s wall time with 4 workers).
+    #[arg(long, default_value_t = 100)]
     skew: u64,
 }
 
@@ -98,8 +98,8 @@ async fn main() -> anyhow::Result<()> {
                 dash.update(&live);
             }
             terminal.draw(|f| ui::draw(f, &dash))?;
-            // Brief pause so the user can see the final state.
-            tokio::time::sleep(Duration::from_millis(600)).await;
+            // Hold the final frame so the user can see the completed state.
+            tokio::time::sleep(Duration::from_millis(1500)).await;
             break;
         }
 
