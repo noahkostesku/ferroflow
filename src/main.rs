@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use ferroflow_core::{Dag, Op, OpKind, RunMetrics, SchedulerMetrics, Tensor};
+use ferroflow_core::{
+    gen_resnet_block, gen_transformer_block, gen_wide_dag, Dag, Op, OpKind, RunMetrics,
+    SchedulerMetrics, Tensor,
+};
 use ferroflow_onnx::{dag_summary, load_model};
 use ferroflow_runtime::{SequentialExecutor, StaticScheduler, WorkStealingScheduler};
 
@@ -14,6 +17,17 @@ use ferroflow_runtime::{SequentialExecutor, StaticScheduler, WorkStealingSchedul
 enum LocalDagKind {
     Uniform,
     Skewed,
+}
+
+/// Synthetic DAG topology for `run` and `info` subcommands.
+#[derive(Debug, Clone, ValueEnum)]
+enum SyntheticDag {
+    /// Transformer attention + FFN block (~18 ops, 3-way QKV parallelism).
+    Transformer,
+    /// Wide fan-out DAG with configurable branch count, depth, and skew fraction.
+    Wide,
+    /// ResNet residual block (~8 ops, fork-join pattern).
+    Resnet,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -60,24 +74,68 @@ enum Command {
         input: PathBuf,
     },
 
-    /// Print the DAG summary for an ONNX model (op count, edge count, type breakdown).
+    /// Print the DAG summary (op count, edge count, type breakdown).
+    ///
+    /// Supply exactly one of `--model` (ONNX file) or `--dag` (synthetic generator).
     Info {
-        /// Path to the ONNX model file.
-        #[arg(long)]
-        model: PathBuf,
+        /// Path to an ONNX model file.
+        #[arg(long, conflicts_with = "dag")]
+        model: Option<PathBuf>,
+        /// Synthetic DAG topology.
+        #[arg(long, conflicts_with = "model")]
+        dag: Option<SyntheticDag>,
+        // Transformer params
+        #[arg(long, default_value = "64")]
+        seq_len: usize,
+        #[arg(long, default_value = "256")]
+        d_model: usize,
+        #[arg(long, default_value = "8")]
+        n_heads: usize,
+        // Wide dag params
+        #[arg(long, default_value = "8")]
+        width: usize,
+        #[arg(long, default_value = "5")]
+        depth: usize,
+        #[arg(long, default_value = "0.25")]
+        skew: f32,
+        // ResNet params
+        #[arg(long, default_value = "64")]
+        channels: usize,
     },
 
-    /// Execute an ONNX model with the work-stealing scheduler and print RunMetrics.
+    /// Execute a DAG with the selected scheduler and print RunMetrics.
+    ///
+    /// Supply exactly one of `--model` (ONNX file) or `--dag` (synthetic generator).
     Run {
-        /// Path to the ONNX model file.
-        #[arg(long)]
-        model: PathBuf,
+        /// Path to an ONNX model file.
+        #[arg(long, conflicts_with = "dag")]
+        model: Option<PathBuf>,
+        /// Synthetic DAG topology.
+        #[arg(long, conflicts_with = "model")]
+        dag: Option<SyntheticDag>,
         /// Number of worker threads.
         #[arg(long, default_value = "4")]
         workers: usize,
         /// Scheduling strategy.
         #[arg(long, default_value = "work-stealing")]
         scheduler: OnnxScheduler,
+        // Transformer params
+        #[arg(long, default_value = "64")]
+        seq_len: usize,
+        #[arg(long, default_value = "256")]
+        d_model: usize,
+        #[arg(long, default_value = "8")]
+        n_heads: usize,
+        // Wide dag params
+        #[arg(long, default_value = "8")]
+        width: usize,
+        #[arg(long, default_value = "5")]
+        depth: usize,
+        #[arg(long, default_value = "0.25")]
+        skew: f32,
+        // ResNet params
+        #[arg(long, default_value = "64")]
+        channels: usize,
     },
 
     /// Run the MPI distributed scheduler across all MPI ranks.
@@ -166,6 +224,53 @@ fn build_local_skewed_dag(
 ) -> (Arc<Dag>, HashMap<usize, Tensor>) {
     let (dag, src) = Dag::with_skew(dag_ops, factor).expect("skewed dag is valid");
     (Arc::new(dag), src)
+}
+
+fn build_synthetic_dag(
+    kind: &SyntheticDag,
+    seq_len: usize,
+    d_model: usize,
+    n_heads: usize,
+    width: usize,
+    depth: usize,
+    skew: f32,
+    channels: usize,
+) -> anyhow::Result<(Arc<Dag>, std::collections::HashMap<usize, Tensor>)> {
+    let (dag, src) = match kind {
+        SyntheticDag::Transformer => gen_transformer_block(seq_len, d_model, n_heads)?,
+        SyntheticDag::Wide => gen_wide_dag(width, depth, skew)?,
+        SyntheticDag::Resnet => gen_resnet_block(channels)?,
+    };
+    Ok((Arc::new(dag), src))
+}
+
+fn synthetic_dag_summary(dag: &Dag) -> String {
+    let n_ops = dag.ops.len();
+    let n_edges: usize = dag.ops.iter().map(|op| op.input_ids.len()).sum();
+    let n_sources = dag.ops.iter().filter(|op| op.input_ids.is_empty()).count();
+    let n_compute = n_ops - n_sources;
+
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for op in &dag.ops {
+        if !op.input_ids.is_empty() {
+            let label = match &op.kind {
+                OpKind::Matmul { .. } => "matmul",
+                OpKind::Relu { .. } => "relu",
+                OpKind::LayerNorm { .. } => "layer_norm",
+                OpKind::Reduce { .. } => "reduce",
+                OpKind::Slow { .. } => "slow",
+            };
+            *counts.entry(label).or_default() += 1;
+        }
+    }
+
+    let mut breakdown: Vec<String> =
+        counts.iter().map(|(&k, &v)| format!("  {k}: {v}")).collect();
+    breakdown.sort();
+    format!(
+        "{n_ops} ops ({n_sources} sources, {n_compute} compute), {n_edges} edges\n{}",
+        breakdown.join("\n")
+    )
 }
 
 // ── MPI DAG builders ──────────────────────────────────────────────────────────
@@ -401,22 +506,74 @@ fn run_mpi_bench(
     Ok(())
 }
 
-// ── ONNX subcommand handlers ──────────────────────────────────────────────────
+// ── ONNX / synthetic subcommand handlers ──────────────────────────────────────
 
-fn run_info(model: &PathBuf) -> Result<()> {
-    let dag = ferroflow_onnx::parse_onnx(model)
-        .with_context(|| format!("parsing {}", model.display()))?;
-    println!("{}", dag_summary(&dag));
+fn run_info(
+    model: Option<&PathBuf>,
+    dag: Option<&SyntheticDag>,
+    seq_len: usize,
+    d_model: usize,
+    n_heads: usize,
+    width: usize,
+    depth: usize,
+    skew: f32,
+    channels: usize,
+) -> Result<()> {
+    match (model, dag) {
+        (Some(path), None) => {
+            let parsed = ferroflow_onnx::parse_onnx(path)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            println!("{}", dag_summary(&parsed));
+        }
+        (None, Some(kind)) => {
+            let (arc_dag, _) =
+                build_synthetic_dag(kind, seq_len, d_model, n_heads, width, depth, skew, channels)
+                    .context("building synthetic DAG")?;
+            println!("{}", synthetic_dag_summary(&arc_dag));
+        }
+        _ => anyhow::bail!("supply exactly one of --model or --dag"),
+    }
     Ok(())
 }
 
-async fn run_model(model: &PathBuf, workers: usize, scheduler: OnnxScheduler) -> Result<()> {
-    let (arc_dag, sources) = load_model(model)
-        .with_context(|| format!("loading {}", model.display()))?;
-    let dag_size = arc_dag.len();
-    let arc_dag = std::sync::Arc::new(arc_dag);
+async fn run_model(
+    model: Option<&PathBuf>,
+    dag: Option<&SyntheticDag>,
+    workers: usize,
+    scheduler: OnnxScheduler,
+    seq_len: usize,
+    d_model: usize,
+    n_heads: usize,
+    width: usize,
+    depth: usize,
+    skew: f32,
+    channels: usize,
+) -> Result<()> {
+    let (arc_dag, sources, is_skew, label) = match (model, dag) {
+        (Some(path), None) => {
+            let (d, s) = load_model(path)
+                .with_context(|| format!("loading {}", path.display()))?;
+            let arc = std::sync::Arc::new(d);
+            println!("{}", dag_summary(&arc));
+            (arc, s, false, "onnx".to_string())
+        }
+        (None, Some(kind)) => {
+            let (arc, s) =
+                build_synthetic_dag(kind, seq_len, d_model, n_heads, width, depth, skew, channels)
+                    .context("building synthetic DAG")?;
+            let skewed = matches!(kind, SyntheticDag::Wide) && skew > 0.0;
+            let lbl = match kind {
+                SyntheticDag::Transformer => "transformer".to_string(),
+                SyntheticDag::Wide => format!("wide({}x{},skew={:.2})", width, depth, skew),
+                SyntheticDag::Resnet => "resnet".to_string(),
+            };
+            println!("{}", synthetic_dag_summary(&arc));
+            (arc, s, skewed, lbl)
+        }
+        _ => anyhow::bail!("supply exactly one of --model or --dag"),
+    };
 
-    println!("{}", dag_summary(&arc_dag));
+    let dag_size = arc_dag.len();
 
     let (sched_name, m) = match scheduler {
         OnnxScheduler::Sequential => {
@@ -447,11 +604,11 @@ async fn run_model(model: &PathBuf, workers: usize, scheduler: OnnxScheduler) ->
         nodes: 1,
         workers_per_node: workers as u32,
         dag_size: dag_size as u32,
-        skew: false,
+        skew: is_skew,
         metrics: m,
     };
     println!(
-        "[run] {sched_name} ({workers}w): {:.1} ms  {:.0} ops/s  idle={:.1}%  steals={:.1}/s",
+        "[run] {sched_name}/{label} ({workers}w): {:.1} ms  {:.0} ops/s  idle={:.1}%  steals={:.1}/s",
         run.metrics.elapsed_ms,
         run.metrics.throughput_ops_per_sec,
         idle_pct(&run),
@@ -481,12 +638,47 @@ async fn main() -> Result<()> {
             print_report(&entries);
         }
 
-        Command::Info { model } => {
-            run_info(&model)?;
+        Command::Info { model, dag, seq_len, d_model, n_heads, width, depth, skew, channels } => {
+            run_info(
+                model.as_ref(),
+                dag.as_ref(),
+                seq_len,
+                d_model,
+                n_heads,
+                width,
+                depth,
+                skew,
+                channels,
+            )?;
         }
 
-        Command::Run { model, workers, scheduler } => {
-            run_model(&model, workers, scheduler).await?;
+        Command::Run {
+            model,
+            dag,
+            workers,
+            scheduler,
+            seq_len,
+            d_model,
+            n_heads,
+            width,
+            depth,
+            skew,
+            channels,
+        } => {
+            run_model(
+                model.as_ref(),
+                dag.as_ref(),
+                workers,
+                scheduler,
+                seq_len,
+                d_model,
+                n_heads,
+                width,
+                depth,
+                skew,
+                channels,
+            )
+            .await?;
         }
 
         #[cfg(feature = "distributed")]

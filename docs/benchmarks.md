@@ -176,3 +176,37 @@ _Full multi-node scaling results (4 / 8 / 16 / 32 nodes) pending Narval runs._
 | mpi-work-stealing|     4 | uniform |            56 /s |  22.6% |      56.3/s |
 | mpi-static       |     4 | skewed  |            17 /s |  43.3% |       0.0/s |
 | mpi-work-stealing|     4 | skewed  |            18 /s |  45.2% |      18.1/s |
+
+## Local Scale Results
+
+| DAG                  | Seq    | Static | WS     |
+|----------------------|--------|--------|--------|
+| transformer          | 3.3 ms | 2.6 ms | 2.5 ms |
+| wide+skew(8×5,0.25)  | 97.2 ms| 59.2 ms| 58.8 ms|
+| resnet               | 0.1 ms | 0.1 ms | 0.1 ms |
+
+### Strong Scaling — Transformer DAG (18 ops, 3-way QKV parallel)
+
+| Nodes |   Static (ops/s) |       WS (ops/s) | WS Efficiency | Steal Rate |
+|-------||-----------------||-----------------||---------------||------------||
+|     2 |             2234 |             1886 |         1.000 |      0.0/s |
+|     4 |             2476 |             1549 |         0.411 |      0.0/s |
+|     8 |             2510 |             1496 |         0.198 |      0.0/s |
+
+### Strong Scaling — Wide Skewed DAG (81 ops, width=16 depth=5 skew=0.25)
+
+| Nodes |   Static (ops/s) |       WS (ops/s) | WS Efficiency | Steal Rate |
+|-------||-----------------||-----------------||---------------||------------||
+|     2 |             2896 |             2877 |         1.000 |      0.0/s |
+|     4 |             3129 |             3057 |         0.531 |      0.0/s |
+|     8 |             3128 |             3021 |         0.263 |      0.0/s |
+
+The work-stealing scheduler showed lower throughput than static across all 
+configurations, with steal rate of 0/s in all runs. This indicates that 
+with 32 threads per worker and DAGs of 18-81 ops, no worker queue ran dry 
+during execution — the steal threshold was never triggered. The efficiency 
+degradation in work-stealing vs static reflects coordination overhead 
+without the compensating benefit of load rebalancing. This suggests the 
+current DAG sizes are too small relative to worker count to demonstrate 
+work-stealing benefits at this scale. Larger DAGs (500+ ops) or reduced 
+thread counts would create the queue exhaustion needed to trigger stealing.

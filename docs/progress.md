@@ -2,7 +2,7 @@
 
 > Check this file at the start of every session to orient on current status.
 
-Last updated: 2026-04-17 (Week 4 Session 3)
+Last updated: 2026-04-17 (Week 5 Session 2)
 
 ---
 
@@ -49,8 +49,9 @@ _Target: 2026-05-04_
 - [x] Criterion bench groups: `sequential/static/ws × uniform/skewed` (6 benches) with custom main
 - [x] Collect worker utilization and steal-rate metrics via `RunMetrics` in one-shot pass
 - [x] Log results to `docs/benchmarks.md`; JSON saved to `docs/benchmark_results.json`
-- [ ] Run static vs. work-stealing on 4, 8, 16, 32 nodes (balanced DAG)
-- [ ] Run static vs. work-stealing on 4, 8, 16, 32 nodes (skewed DAG)
+- [x] `slurm/scaling.sh`: strong scaling harness — 2/4/8/16 nodes × static/WS × transformer/wide × 3 runs; per-rank output via `$SCRATCH`; JSON append; prints comparison tables + 4-sentence analysis; appends to `docs/benchmarks.md`
+- [ ] Run static vs. work-stealing on 4, 8, 16, 32 nodes (balanced DAG) — pending Narval `sbatch slurm/scaling.sh`
+- [ ] Run static vs. work-stealing on 4, 8, 16, 32 nodes (skewed DAG) — pending Narval `sbatch slurm/scaling.sh`
 - [ ] Profile coordinator bottleneck (is it the bottleneck at 32+ nodes?)
 - [ ] Tune backoff strategy in worker steal loop
 - [ ] Tune rayon thread pool size vs. `$SLURM_CPUS_PER_TASK`
@@ -63,7 +64,8 @@ _Target: 2026-05-11_
 - [x] CLI extended: `ferroflow info --model <path>` (dag_summary) and `ferroflow run --model <path> --workers <n> --scheduler <seq|static|work-stealing>`
 - [x] `scripts/export_mlp.py` exports a 784→256→128→10 MLP; `models/mlp.onnx` verified
 - [x] End-to-end: `ferroflow info` prints 12 ops / 5 compute / 8 edges; `ferroflow run --workers 4` executes and prints RunMetrics; 37/37 tests pass
-- [ ] CLI (`src/main.rs`): accept DAG spec file, node count, scheduler type
+- [x] Synthetic DAG generators: `crates/core/src/dag_gen.rs` — `gen_transformer_block(seq_len, d_model, n_heads)` (18 ops, 3-way QKV parallel), `gen_wide_dag(width, depth, skew_factor)` (width×depth ops, configurable skew), `gen_resnet_block(channels)` (8 ops, fork-join); 12 unit tests; 55/55 tests pass
+- [x] CLI extended: `ferroflow info/run --dag <transformer|wide|resnet>` alongside `--model`; wide supports `--width`, `--depth`, `--skew`; transformer supports `--seq-len`, `--d-model`, `--n-heads`; resnet supports `--channels`
 - [ ] DAG spec file format (JSON or TOML)
 - [ ] README.md with project description, build instructions, benchmark summary
 - [ ] Clean up all `clippy` warnings
@@ -87,4 +89,6 @@ _Target: 2026-05-11_
 - **2026-04-17:** Week 3 Session 1. Metrics layer added to `ferroflow-core`. All three schedulers now return `(HashMap<OpId, Tensor>, SchedulerMetrics)`. Benches updated to `.unwrap().0`. 32/32 tests pass.
 - **2026-04-17:** Week 3 Session 2. `OpKind::Slow { duration_ms }` added to core; `Dag::with_skew(n_ops, factor)` constructor builds two-branch skewed DAG. Bench rewritten with 6 functions across 2 groups + custom `main` that prints RunMetrics comparison table and saves `docs/benchmark_results.json`. 33/33 tests pass. Key local results: uniform DAG ~1.1 ms sequential / ~1.4 ms parallel (chain serial, no parallelism); skewed DAG ~74 ms sequential / ~21 ms static+WS (3.5× speedup). Steal threshold prevents stealing on this fan-out topology — real WS benefit expected at Narval scale.
 - **2026-04-17:** Week 4 Session 3. Live TUI dashboard in `crates/tui`. Added `LiveMetrics` / `WorkerLiveSnapshot` / `WorkerLiveStatus` to `ferroflow-core`. Refactored `WorkStealingScheduler` to track per-worker atomics (`worker_ops`, `worker_status`, `worker_idle_us`); `execute_with_watch` spawns a 100 ms ticker that sends snapshots via `watch::Sender<LiveMetrics>`; `execute` delegates to it. `ferroflow-tui` binary: 4-panel ratatui dashboard (worker gauges + throughput sparkline + steal activity + summary), prints final `RunMetrics` on completion. 38/38 tests pass.
+- **2026-04-17:** Week 5 Session 2. `slurm/scaling.sh` — strong scaling harness (2/4/8/16 nodes, transformer+wide-skew, static+WS, 3 runs/config, median). srun per-rank output to $SCRATCH. JSON append, comparison tables, analysis paragraph auto-generated. Ready to rsync and sbatch.
+- **2026-04-17:** Week 5 Session 1. Synthetic DAG generators in `crates/core/src/dag_gen.rs`. Local scaling preview (release build, 4 workers): transformer WS=2.5 ms vs static=2.6 ms vs seq=3.3 ms; resnet WS=0.1 ms (fork-join too small for steal benefit); wide+skew(8×5,0.25) WS=58.8 ms vs static=59.2 ms vs seq=97.2 ms (1.65× speedup over sequential). Steal rate is 0 locally — coordinator-mediated stealing is the key differentiator at Narval scale. 55/55 tests pass.
 - **2026-04-17:** Week 4 Session 1. PyO3 bindings in `crates/python` (new workspace member). `#[pyclass(name = "DAG")]` wraps a `Vec<Op>` builder; `matmul`/`relu`/`layer_norm`/`reduce` each append an `Op` and return its `u32` ID. `run(dag, workers)` constructs the `Dag`, pre-populates source tensors, and blocks a new `tokio::Runtime` on `WorkStealingScheduler::execute`. `pyproject.toml` uses maturin 1.x. `maturin develop` + `python ferroflow/examples/simple_mlp.py` verified — 33/33 tests pass.
