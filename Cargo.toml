@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/core", "crates/runtime", "crates/python", "crates/onnx"]
+members = [".", "crates/core", "crates/runtime", "crates/python", "crates/onnx", "crates/tui"]
 exclude = ["mpi-hello"]
 resolver = "2"
 
@@ -16,6 +16,8 @@ anyhow      = "1"
 tracing     = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 criterion   = { version = "0.5", features = ["html_reports"] }
+ratatui     = "0.26"
+crossterm   = "0.27"
 ferroflow-core    = { path = "crates/core" }
 ferroflow-runtime = { path = "crates/runtime" }
 ferroflow-onnx    = { path = "crates/onnx" }

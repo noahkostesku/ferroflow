@@ -2,6 +2,69 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// Real-time status of a single worker during scheduler execution.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkerLiveStatus {
+    /// No work queued; waiting for steals or dependency completion.
+    Idle,
+    /// Currently executing an op.
+    Executing,
+    /// Scanning peer queues attempting a steal.
+    Stealing,
+}
+
+/// Per-worker snapshot emitted by the live-metrics ticker.
+#[derive(Debug, Clone)]
+pub struct WorkerLiveSnapshot {
+    /// Zero-based worker index.
+    pub id: usize,
+    /// Ops completed by this worker so far.
+    pub ops_completed: u64,
+    /// Cumulative idle time in microseconds.
+    pub idle_us: u64,
+    /// Current activity status.
+    pub status: WorkerLiveStatus,
+}
+
+/// Scheduler state snapshot emitted every 100 ms by
+/// [`WorkStealingScheduler::execute_with_watch`](crate::WorkStealingScheduler::execute_with_watch).
+#[derive(Debug, Clone)]
+pub struct LiveMetrics {
+    /// Per-worker snapshots.
+    pub workers: Vec<WorkerLiveSnapshot>,
+    /// Total compute ops in the DAG.
+    pub total_ops: u64,
+    /// Ops completed so far.
+    pub completed_ops: u64,
+    /// Wall-clock seconds since execution started.
+    pub elapsed_secs: f64,
+    /// Cumulative steal attempts across all workers.
+    pub steal_attempts: u64,
+    /// Cumulative successful steals across all workers.
+    pub successful_steals: u64,
+}
+
+impl LiveMetrics {
+    /// Constructs an empty initial snapshot with all workers idle.
+    pub fn empty(n_workers: usize) -> Self {
+        Self {
+            workers: (0..n_workers)
+                .map(|i| WorkerLiveSnapshot {
+                    id: i,
+                    ops_completed: 0,
+                    idle_us: 0,
+                    status: WorkerLiveStatus::Idle,
+                })
+                .collect(),
+            total_ops: 0,
+            completed_ops: 0,
+            elapsed_secs: 0.0,
+            steal_attempts: 0,
+            successful_steals: 0,
+        }
+    }
+}
+
 /// Execution metrics collected by a scheduler after running a DAG.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulerMetrics {

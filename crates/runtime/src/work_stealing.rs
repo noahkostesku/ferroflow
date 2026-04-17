@@ -1,15 +1,21 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ferroflow_core::{ops::execute_op, Dag, OpId, SchedulerMetrics, Tensor};
+use ferroflow_core::{
+    ops::execute_op, Dag, LiveMetrics, OpId, SchedulerMetrics, Tensor, WorkerLiveSnapshot,
+    WorkerLiveStatus,
+};
 use tokio::sync::{watch, Mutex};
 
 use crate::static_scheduler::SchedulerError;
 use crate::worker::WorkQueue;
 
 const STEAL_THRESHOLD: usize = 2;
+const STATUS_IDLE: u8 = 0;
+const STATUS_EXEC: u8 = 1;
+const STATUS_STEAL: u8 = 2;
 
 /// Errors returned by [`WorkStealingScheduler::execute`].
 ///
@@ -36,14 +42,10 @@ impl WorkStealingScheduler {
         Self { n_workers }
     }
 
-    /// Executes `dag` with work-stealing across `n_workers` tokio tasks.
+    /// Executes `dag` returning the complete tensor store and execution metrics.
     ///
-    /// Initial assignment is identical to [`StaticScheduler`](crate::StaticScheduler)
-    /// (round-robin by `op_id % n_workers`).  Workers steal from victims when
-    /// idle, choosing the first victim whose queue exceeds the steal threshold.
-    ///
-    /// Returns the complete tensor store and execution metrics after all ops
-    /// finish.
+    /// Convenience wrapper around [`execute_with_watch`](Self::execute_with_watch)
+    /// that discards the live-metrics stream.
     ///
     /// # Errors
     /// Returns [`WorkStealingError`] if any op fails.
@@ -52,17 +54,36 @@ impl WorkStealingScheduler {
         dag: Arc<Dag>,
         source_tensors: HashMap<OpId, Tensor>,
     ) -> Result<(HashMap<OpId, Tensor>, SchedulerMetrics), WorkStealingError> {
+        let (tx, _rx) = watch::channel(LiveMetrics::empty(self.n_workers));
+        self.execute_with_watch(dag, source_tensors, tx).await
+    }
+
+    /// Executes `dag` and streams live metrics snapshots every 100 ms via
+    /// `metrics_tx`.
+    ///
+    /// Initial op assignment is round-robin (`op_id % n_workers`).  Workers
+    /// steal from peers when idle, respecting the steal threshold.  A
+    /// background ticker task reads per-worker atomics and sends a
+    /// [`LiveMetrics`] snapshot to `metrics_tx` at 100 ms intervals.  The
+    /// ticker stops when all workers finish or when all receivers are dropped.
+    ///
+    /// # Errors
+    /// Returns [`WorkStealingError`] if any op fails.
+    pub async fn execute_with_watch(
+        &self,
+        dag: Arc<Dag>,
+        source_tensors: HashMap<OpId, Tensor>,
+        metrics_tx: watch::Sender<LiveMetrics>,
+    ) -> Result<(HashMap<OpId, Tensor>, SchedulerMetrics), WorkStealingError> {
         let n = self.n_workers;
         let total_ops =
             dag.ops.iter().filter(|op| !op.input_ids.is_empty()).count() as u64;
 
-        // Build per-worker queues with round-robin initial assignment.
+        // Per-worker queues with round-robin initial assignment.
         let queues: Arc<Vec<WorkQueue>> = Arc::new((0..n).map(|_| WorkQueue::new()).collect());
-        {
-            for op in &dag.ops {
-                if !op.input_ids.is_empty() {
-                    queues[op.id % n].push(op.id).await;
-                }
+        for op in &dag.ops {
+            if !op.input_ids.is_empty() {
+                queues[op.id % n].push(op.id).await;
             }
         }
 
@@ -76,7 +97,63 @@ impl WorkStealingScheduler {
         let steal_attempts = Arc::new(AtomicU64::new(0));
         let successful_steals = Arc::new(AtomicU64::new(0));
 
+        // Per-worker tracking for the live-metrics ticker.
+        let worker_ops: Arc<Vec<AtomicU64>> =
+            Arc::new((0..n).map(|_| AtomicU64::new(0)).collect());
+        let worker_status: Arc<Vec<AtomicU8>> =
+            Arc::new((0..n).map(|_| AtomicU8::new(STATUS_IDLE)).collect());
+        let worker_idle_us: Arc<Vec<AtomicU64>> =
+            Arc::new((0..n).map(|_| AtomicU64::new(0)).collect());
+
         let t0 = Instant::now();
+
+        // Background metrics ticker.
+        let ticker = {
+            let completed_t = Arc::clone(&completed);
+            let steal_attempts_t = Arc::clone(&steal_attempts);
+            let successful_steals_t = Arc::clone(&successful_steals);
+            let worker_ops_t = Arc::clone(&worker_ops);
+            let worker_status_t = Arc::clone(&worker_status);
+            let worker_idle_us_t = Arc::clone(&worker_idle_us);
+
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(Duration::from_millis(100));
+                interval
+                    .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    let cmp = completed_t.load(Ordering::Relaxed);
+                    let sa = steal_attempts_t.load(Ordering::Relaxed);
+                    let ss = successful_steals_t.load(Ordering::Relaxed);
+                    let elapsed = t0.elapsed().as_secs_f64();
+                    let workers = (0..n)
+                        .map(|i| WorkerLiveSnapshot {
+                            id: i,
+                            ops_completed: worker_ops_t[i].load(Ordering::Relaxed),
+                            idle_us: worker_idle_us_t[i].load(Ordering::Relaxed),
+                            status: match worker_status_t[i].load(Ordering::Relaxed) {
+                                STATUS_EXEC => WorkerLiveStatus::Executing,
+                                STATUS_STEAL => WorkerLiveStatus::Stealing,
+                                _ => WorkerLiveStatus::Idle,
+                            },
+                        })
+                        .collect();
+                    let live = LiveMetrics {
+                        workers,
+                        total_ops,
+                        completed_ops: cmp,
+                        elapsed_secs: elapsed,
+                        steal_attempts: sa,
+                        successful_steals: ss,
+                    };
+                    if metrics_tx.send(live).is_err() {
+                        break;
+                    }
+                }
+            })
+        };
+
         let mut handles = Vec::with_capacity(n);
 
         for worker_id in 0..n {
@@ -88,22 +165,24 @@ impl WorkStealingScheduler {
             let completed = Arc::clone(&completed);
             let steal_attempts = Arc::clone(&steal_attempts);
             let successful_steals = Arc::clone(&successful_steals);
+            let worker_ops = Arc::clone(&worker_ops);
+            let worker_status = Arc::clone(&worker_status);
+            let worker_idle_us = Arc::clone(&worker_idle_us);
 
-            // Task returns idle microseconds accumulated by this worker.
             handles.push(tokio::spawn(async move {
                 let mut attempt = 0usize;
-                let mut idle_micros: u64 = 0;
 
                 loop {
                     if completed.load(Ordering::Acquire) >= total_ops {
                         break;
                     }
 
-                    // Try own queue first.
+                    worker_status[worker_id].store(STATUS_IDLE, Ordering::Relaxed);
+
                     let op_id = match queues[worker_id].pop().await {
                         Some(id) => id,
                         None => {
-                            // Attempt to steal from another worker.
+                            worker_status[worker_id].store(STATUS_STEAL, Ordering::Relaxed);
                             let mut stolen = None;
                             for offset in 1..n {
                                 let victim = (worker_id + offset) % n;
@@ -122,9 +201,8 @@ impl WorkStealingScheduler {
                                     id
                                 }
                                 None => {
-                                    // Back off: wait for any op to complete (wakes up
-                                    // reactively via version channel) or for the maximum
-                                    // backoff window to expire (10–50 ms).
+                                    worker_status[worker_id]
+                                        .store(STATUS_IDLE, Ordering::Relaxed);
                                     let backoff_ms =
                                         10 + ((worker_id * 13 + attempt * 7) % 41) as u64;
                                     attempt += 1;
@@ -136,14 +214,19 @@ impl WorkStealingScheduler {
                                             Duration::from_millis(backoff_ms)
                                         ) => {}
                                     }
-                                    idle_micros += tw.elapsed().as_micros() as u64;
+                                    worker_idle_us[worker_id].fetch_add(
+                                        tw.elapsed().as_micros() as u64,
+                                        Ordering::Relaxed,
+                                    );
                                     continue;
                                 }
                             }
                         }
                     };
 
-                    // Wait until all input dependencies are in the store.
+                    worker_status[worker_id].store(STATUS_EXEC, Ordering::Relaxed);
+
+                    // Wait for all input dependencies.
                     loop {
                         version_rx.borrow_and_update();
                         let ready = {
@@ -156,7 +239,10 @@ impl WorkStealingScheduler {
                         }
                         let tw = Instant::now();
                         version_rx.changed().await.ok();
-                        idle_micros += tw.elapsed().as_micros() as u64;
+                        worker_idle_us[worker_id].fetch_add(
+                            tw.elapsed().as_micros() as u64,
+                            Ordering::Relaxed,
+                        );
                     }
 
                     let op = dag.get_op(op_id).expect("valid op id");
@@ -168,27 +254,30 @@ impl WorkStealingScheduler {
                     let result = execute_op(op, &input_refs)
                         .map_err(|source| SchedulerError::OpFailed { op_id, source })?;
 
-                    {
-                        store.lock().await.insert(op_id, result);
-                    }
+                    store.lock().await.insert(op_id, result);
+                    worker_ops[worker_id].fetch_add(1, Ordering::Relaxed);
                     completed.fetch_add(1, Ordering::Release);
                     version_tx.send_modify(|v| *v += 1);
                 }
 
-                Ok::<u64, WorkStealingError>(idle_micros)
+                Ok::<(), WorkStealingError>(())
             }));
         }
 
-        let mut total_idle_micros: u64 = 0;
         for handle in handles {
-            total_idle_micros += handle.await.expect("worker task panicked")?;
+            handle.await.expect("worker task panicked")?;
         }
 
+        ticker.abort();
+
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let total_idle_micros: u64 =
+            worker_idle_us.iter().map(|a| a.load(Ordering::Relaxed)).sum();
         let idle_time_ms = total_idle_micros as f64 / 1000.0;
         let sa = steal_attempts.load(Ordering::Relaxed);
         let ss = successful_steals.load(Ordering::Relaxed);
-        let metrics = SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, sa, ss);
+        let metrics =
+            SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, sa, ss);
 
         let store = Arc::try_unwrap(store)
             .expect("all worker handles dropped")
@@ -260,5 +349,27 @@ mod tests {
         let (results, _) = sched.execute(dag, sources).await.unwrap();
         let flat: Vec<f32> = results[&2].data.iter().copied().collect();
         assert_eq!(flat, vec![1., 2., 3., 4.]);
+    }
+
+    #[tokio::test]
+    async fn execute_with_watch_sends_metrics() {
+        let ops = vec![
+            Op::new(0, OpKind::Relu { len: 4 }, vec![], vec![4]),
+            Op::new(1, OpKind::Relu { len: 4 }, vec![0], vec![4]),
+            Op::new(2, OpKind::Relu { len: 4 }, vec![1], vec![4]),
+        ];
+        let dag = Arc::new(Dag::new(ops).unwrap());
+        let sched = WorkStealingScheduler::new(2);
+
+        let mut sources = HashMap::new();
+        sources.insert(0usize, Tensor::full(&[4], 1.0));
+
+        let init = LiveMetrics::empty(2);
+        let (tx, rx) = watch::channel(init);
+
+        let (_, metrics) = sched.execute_with_watch(dag, sources, tx).await.unwrap();
+        assert_eq!(metrics.total_ops, 2);
+        // Receiver should have seen at least one update.
+        assert_eq!(rx.borrow().workers.len(), 2);
     }
 }

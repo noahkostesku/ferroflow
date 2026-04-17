@@ -2,7 +2,7 @@
 
 > Check this file at the start of every session to orient on current status.
 
-Last updated: 2026-04-17 (Week 4 Session 2)
+Last updated: 2026-04-17 (Week 4 Session 3)
 
 ---
 
@@ -72,6 +72,7 @@ _Target: 2026-05-11_
 - [ ] Update `docs/benchmarks.md` with final results
 - [ ] Tag v0.1.0 release
 - [x] (Optional) PyO3 bindings: `crates/python` — `DAG` + `run` via `WorkStealingScheduler`; `maturin develop` + `simple_mlp.py` verified
+- [x] (Optional) TUI dashboard: `crates/tui` (`ferroflow-tui`) — `DashboardState`, `WorkerStatus`, four-panel ratatui layout (workers/throughput/steal-activity/summary); `WorkStealingScheduler::execute_with_watch` streams `LiveMetrics` via `tokio::sync::watch` at 100 ms; final `RunMetrics` table printed on completion; `ferroflow-tui --workers <n> --dag-size <n> --skew <n>`; 38/38 tests pass
 - [ ] (Optional) Visualizer: DOT/graphviz output for DAG structure
 
 ---
@@ -85,4 +86,5 @@ _Target: 2026-05-11_
 - **Week 1 remaining:** CI setup (clippy in GH Actions). All code complete.
 - **2026-04-17:** Week 3 Session 1. Metrics layer added to `ferroflow-core`. All three schedulers now return `(HashMap<OpId, Tensor>, SchedulerMetrics)`. Benches updated to `.unwrap().0`. 32/32 tests pass.
 - **2026-04-17:** Week 3 Session 2. `OpKind::Slow { duration_ms }` added to core; `Dag::with_skew(n_ops, factor)` constructor builds two-branch skewed DAG. Bench rewritten with 6 functions across 2 groups + custom `main` that prints RunMetrics comparison table and saves `docs/benchmark_results.json`. 33/33 tests pass. Key local results: uniform DAG ~1.1 ms sequential / ~1.4 ms parallel (chain serial, no parallelism); skewed DAG ~74 ms sequential / ~21 ms static+WS (3.5× speedup). Steal threshold prevents stealing on this fan-out topology — real WS benefit expected at Narval scale.
+- **2026-04-17:** Week 4 Session 3. Live TUI dashboard in `crates/tui`. Added `LiveMetrics` / `WorkerLiveSnapshot` / `WorkerLiveStatus` to `ferroflow-core`. Refactored `WorkStealingScheduler` to track per-worker atomics (`worker_ops`, `worker_status`, `worker_idle_us`); `execute_with_watch` spawns a 100 ms ticker that sends snapshots via `watch::Sender<LiveMetrics>`; `execute` delegates to it. `ferroflow-tui` binary: 4-panel ratatui dashboard (worker gauges + throughput sparkline + steal activity + summary), prints final `RunMetrics` on completion. 38/38 tests pass.
 - **2026-04-17:** Week 4 Session 1. PyO3 bindings in `crates/python` (new workspace member). `#[pyclass(name = "DAG")]` wraps a `Vec<Op>` builder; `matmul`/`relu`/`layer_norm`/`reduce` each append an `Op` and return its `u32` ID. `run(dag, workers)` constructs the `Dag`, pre-populates source tensors, and blocks a new `tokio::Runtime` on `WorkStealingScheduler::execute`. `pyproject.toml` uses maturin 1.x. `maturin develop` + `python ferroflow/examples/simple_mlp.py` verified — 33/33 tests pass.
