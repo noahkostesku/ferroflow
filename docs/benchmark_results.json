@@ -1,0 +1,104 @@
+[
+  {
+    "scheduler": "sequential",
+    "nodes": 1,
+    "workers_per_node": 1,
+    "dag_size": 41,
+    "skew": false,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 1.166542,
+      "throughput_ops_per_sec": 17144.689175357595,
+      "idle_time_ms": 0.0,
+      "steal_attempts": 0,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "static",
+    "nodes": 1,
+    "workers_per_node": 4,
+    "dag_size": 41,
+    "skew": false,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 1.418583,
+      "throughput_ops_per_sec": 14098.575832362294,
+      "idle_time_ms": 3.64,
+      "steal_attempts": 0,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "work-stealing",
+    "nodes": 1,
+    "workers_per_node": 4,
+    "dag_size": 41,
+    "skew": false,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 1.243208,
+      "throughput_ops_per_sec": 16087.412564912709,
+      "idle_time_ms": 3.295,
+      "steal_attempts": 27,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "sequential",
+    "nodes": 1,
+    "workers_per_node": 1,
+    "dag_size": 22,
+    "skew": true,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 74.673542,
+      "throughput_ops_per_sec": 267.83248074666125,
+      "idle_time_ms": 0.0,
+      "steal_attempts": 0,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "static",
+    "nodes": 1,
+    "workers_per_node": 4,
+    "dag_size": 22,
+    "skew": true,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 21.400709,
+      "throughput_ops_per_sec": 934.5484768752287,
+      "idle_time_ms": 0.0,
+      "steal_attempts": 0,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  },
+  {
+    "scheduler": "work-stealing",
+    "nodes": 1,
+    "workers_per_node": 4,
+    "dag_size": 22,
+    "skew": true,
+    "metrics": {
+      "total_ops": 20,
+      "completed_ops": 20,
+      "elapsed_ms": 21.385792000000002,
+      "throughput_ops_per_sec": 935.2003423581413,
+      "idle_time_ms": 9.846,
+      "steal_attempts": 15,
+      "successful_steals": 0,
+      "steal_rate": 0.0
+    }
+  }
+]

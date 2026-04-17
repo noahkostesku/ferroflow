@@ -1,46 +1,35 @@
-//! Criterion benchmarks comparing sequential, static, and work-stealing schedulers.
+//! Criterion benchmarks comparing sequential, static, and work-stealing schedulers
+//! across two DAG topologies.
 //!
-//! Topology A — balanced matmul chain:
-//!   src_0 (128×128) ──▶ mm_1 ──▶ mm_2 ──▶ … ──▶ mm_20
-//!   src_1 (128×128) ──┘
-//!   …
+//! **Group 1 — uniform** (no skew): 20-op matmul chain, 128×128 matrices.
+//! **Group 2 — skewed**: 20-op two-branch DAG built with [`Dag::with_skew`];
+//!   the slow branch takes 5× longer per op than the fast branch.
 //!
-//! Topology B — skewed fan-out (8 heavy + 8 light independent ops):
-//!   src_0, src_1 (192×192) ──▶ heavy_ops[0..7]   (192×192 matmul each)
-//!   src_2, src_3  (48×48)  ──▶ light_ops[0..7]   (48×48  matmul each)
-//!
-//!   With 4 workers and round-robin assignment, heavy ops land exclusively on
-//!   workers 0 and 1 (op_id % 4 ∈ {0,1}), leaving workers 2 and 3 with only
-//!   light ops.  Work-stealing redistributes the heavy ops across all four
-//!   workers once the fast workers become idle.
+//! After the Criterion runs, a one-shot metrics collection pass prints a
+//! markdown comparison table and saves `docs/benchmark_results.json`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use ferroflow_core::{Dag, Op, OpKind, Tensor};
+use criterion::{black_box, criterion_group, Criterion};
+use ferroflow_core::{Dag, Op, OpKind, RunMetrics, SchedulerMetrics, Tensor};
 use ferroflow_runtime::{SequentialExecutor, StaticScheduler, WorkStealingScheduler};
+use tokio::runtime::Runtime;
 
 const CHAIN_LEN: usize = 20;
 const CHAIN_DIM: usize = 128;
 const N_WORKERS: usize = 4;
+const SLOW_BRANCH_FACTOR: u64 = 5;
 
 // ── DAG builders ─────────────────────────────────────────────────────────────
 
-/// Builds a linear matmul chain of `chain_len` ops (each `dim×dim`).
-///
-/// Returns `(dag, source_tensors)`.
-fn build_matmul_chain(chain_len: usize, dim: usize) -> (Arc<Dag>, HashMap<usize, Tensor>) {
+/// Uniform matmul chain: `chain_len` ops each computing `dim×dim` × `dim×dim`.
+fn build_uniform_dag(chain_len: usize, dim: usize) -> (Arc<Dag>, HashMap<usize, Tensor>) {
     let n_sources = chain_len + 1;
     let mut ops: Vec<Op> = Vec::new();
 
     for id in 0..n_sources {
-        ops.push(Op::new(
-            id,
-            OpKind::Matmul { m: dim, n: dim, k: dim },
-            vec![],
-            vec![dim, dim],
-        ));
+        ops.push(Op::new(id, OpKind::Matmul { m: dim, n: dim, k: dim }, vec![], vec![dim, dim]));
     }
 
     let mut prev_id = 0usize;
@@ -56,127 +45,182 @@ fn build_matmul_chain(chain_len: usize, dim: usize) -> (Arc<Dag>, HashMap<usize,
         prev_id = compute_id;
     }
 
-    let dag = Arc::new(Dag::new(ops).expect("chain dag is acyclic"));
+    let dag = Arc::new(Dag::new(ops).expect("uniform dag is acyclic"));
     let val = 1.0 / dim as f32;
     let sources = (0..n_sources).map(|id| (id, Tensor::full(&[dim, dim], val))).collect();
     (dag, sources)
 }
 
-/// Builds a skewed fan-out DAG designed to expose static-scheduler imbalance.
-///
-/// Structure (total 20 ops):
-/// - ops 0..3 : source tensors (4 sources)
-/// - ops 4..19: 16 independent compute ops, all depending only on sources
-///   - `op_id % 4 ∈ {0, 1}` (ids 4,5,8,9,12,13,16,17) → HEAVY: 192×192 matmul
-///   - `op_id % 4 ∈ {2, 3}` (ids 6,7,10,11,14,15,18,19) → LIGHT: 48×48  matmul
-///
-/// With n_workers=4 and round-robin: workers 0 and 1 each receive 4 heavy ops,
-/// workers 2 and 3 receive 4 light ops each.  Work-stealing allows workers 2
-/// and 3 to steal heavy ops once their queues are drained.
-fn build_skewed_dag() -> (Arc<Dag>, HashMap<usize, Tensor>) {
-    const HEAVY: usize = 192;
-    const LIGHT: usize = 48;
+/// Two-branch skewed DAG via [`Dag::with_skew`].
+fn build_skewed_dag(n_ops: usize, factor: u64) -> (Arc<Dag>, HashMap<usize, Tensor>) {
+    let (dag, sources) =
+        Dag::with_skew(n_ops, factor).expect("skewed dag is valid");
+    (Arc::new(dag), sources)
+}
 
-    // 4 sources: 0,1 feed heavy ops; 2,3 feed light ops.
-    let mut ops = vec![
-        Op::new(0, OpKind::Matmul { m: HEAVY, n: HEAVY, k: HEAVY }, vec![], vec![HEAVY, HEAVY]),
-        Op::new(1, OpKind::Matmul { m: HEAVY, n: HEAVY, k: HEAVY }, vec![], vec![HEAVY, HEAVY]),
-        Op::new(2, OpKind::Matmul { m: LIGHT, n: LIGHT, k: LIGHT }, vec![], vec![LIGHT, LIGHT]),
-        Op::new(3, OpKind::Matmul { m: LIGHT, n: LIGHT, k: LIGHT }, vec![], vec![LIGHT, LIGHT]),
-    ];
+// ── Metrics collection ───────────────────────────────────────────────────────
 
-    // 16 compute ops (ids 4..19).
-    for id in 4..20usize {
-        let is_heavy = id % 4 < 2; // ids ≡ 0,1 mod 4
-        if is_heavy {
-            ops.push(Op::new(
-                id,
-                OpKind::Matmul { m: HEAVY, n: HEAVY, k: HEAVY },
-                vec![0, 1],
-                vec![HEAVY, HEAVY],
-            ));
-        } else {
-            ops.push(Op::new(
-                id,
-                OpKind::Matmul { m: LIGHT, n: LIGHT, k: LIGHT },
-                vec![2, 3],
-                vec![LIGHT, LIGHT],
-            ));
-        }
+fn make_run_metrics(
+    scheduler: &str,
+    skew: bool,
+    dag_size: usize,
+    workers: u32,
+    m: SchedulerMetrics,
+) -> RunMetrics {
+    RunMetrics {
+        scheduler: scheduler.to_string(),
+        nodes: 1,
+        workers_per_node: workers,
+        dag_size: dag_size as u32,
+        skew,
+        metrics: m,
     }
-
-    let dag = Arc::new(Dag::new(ops).expect("skewed dag is acyclic"));
-
-    let heavy_val = 1.0 / HEAVY as f32;
-    let light_val = 1.0 / LIGHT as f32;
-    let sources = HashMap::from([
-        (0, Tensor::full(&[HEAVY, HEAVY], heavy_val)),
-        (1, Tensor::full(&[HEAVY, HEAVY], heavy_val)),
-        (2, Tensor::full(&[LIGHT, LIGHT], light_val)),
-        (3, Tensor::full(&[LIGHT, LIGHT], light_val)),
-    ]);
-
-    (dag, sources)
 }
 
-// ── Benchmarks ───────────────────────────────────────────────────────────────
+/// Runs all six variants once and returns their [`RunMetrics`].
+fn collect_all_metrics() -> Vec<RunMetrics> {
+    let rt = Runtime::new().expect("tokio runtime");
+    let mut results = Vec::with_capacity(6);
 
-fn bench_sequential_chain(c: &mut Criterion) {
-    let (dag, sources) = build_matmul_chain(CHAIN_LEN, CHAIN_DIM);
+    // ── uniform ──────────────────────────────────────────────────────────────
 
-    c.bench_function(
-        &format!("sequential_{CHAIN_LEN}op_matmul_chain_{CHAIN_DIM}x{CHAIN_DIM}"),
-        |b| {
-            b.iter(|| {
-                let s = sources.clone();
-                black_box(SequentialExecutor::execute(black_box(&dag), s).unwrap())
-            })
-        },
-    );
-}
+    let (dag, src) = build_uniform_dag(CHAIN_LEN, CHAIN_DIM);
+    let (_, m) = SequentialExecutor::execute(&dag, src).unwrap();
+    results.push(make_run_metrics("sequential", false, dag.len(), 1, m));
 
-fn bench_static_chain(c: &mut Criterion) {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(N_WORKERS)
-        .enable_time()
-        .build()
-        .unwrap();
-    let (dag, sources) = build_matmul_chain(CHAIN_LEN, CHAIN_DIM);
+    let (dag, src) = build_uniform_dag(CHAIN_LEN, CHAIN_DIM);
     let sched = StaticScheduler::new(&dag, N_WORKERS);
+    let (_, m) = rt.block_on(sched.execute(Arc::clone(&dag), src)).unwrap();
+    results.push(make_run_metrics("static", false, dag.len(), N_WORKERS as u32, m));
 
+    let (dag, src) = build_uniform_dag(CHAIN_LEN, CHAIN_DIM);
+    let sched = WorkStealingScheduler::new(N_WORKERS);
+    let (_, m) = rt.block_on(sched.execute(Arc::clone(&dag), src)).unwrap();
+    results.push(make_run_metrics("work-stealing", false, dag.len(), N_WORKERS as u32, m));
+
+    // ── skewed ───────────────────────────────────────────────────────────────
+
+    let (dag, src) = build_skewed_dag(CHAIN_LEN, SLOW_BRANCH_FACTOR);
+    let (_, m) = SequentialExecutor::execute(&dag, src).unwrap();
+    results.push(make_run_metrics("sequential", true, dag.len(), 1, m));
+
+    let (dag, src) = build_skewed_dag(CHAIN_LEN, SLOW_BRANCH_FACTOR);
+    let sched = StaticScheduler::new(&dag, N_WORKERS);
+    let (_, m) = rt.block_on(sched.execute(Arc::clone(&dag), src)).unwrap();
+    results.push(make_run_metrics("static", true, dag.len(), N_WORKERS as u32, m));
+
+    let (dag, src) = build_skewed_dag(CHAIN_LEN, SLOW_BRANCH_FACTOR);
+    let sched = WorkStealingScheduler::new(N_WORKERS);
+    let (_, m) = rt.block_on(sched.execute(Arc::clone(&dag), src)).unwrap();
+    results.push(make_run_metrics("work-stealing", true, dag.len(), N_WORKERS as u32, m));
+
+    results
+}
+
+// ── Output helpers ────────────────────────────────────────────────────────────
+
+fn idle_pct(r: &RunMetrics) -> f64 {
+    let workers = r.workers_per_node.max(1) as f64;
+    let total_worker_ms = r.metrics.elapsed_ms * workers;
+    if total_worker_ms > 0.0 {
+        r.metrics.idle_time_ms / total_worker_ms * 100.0
+    } else {
+        0.0
+    }
+}
+
+fn print_markdown_table(results: &[RunMetrics]) {
+    println!("\n## Scheduler Comparison\n");
+    println!(
+        "| {:<13} | {:<7} | {:>14} | {:>6} | {:>10} |",
+        "Scheduler", "DAG", "Throughput", "Idle%", "Steal Rate"
+    );
+    println!("|{:-<15}|{:-<9}|{:-<16}|{:-<8}|{:-<12}|", "", "", "", "", "");
+    for r in results {
+        let dag_label = if r.skew { "skewed" } else { "uniform" };
+        let throughput = format!("{:.0} ops/s", r.metrics.throughput_ops_per_sec);
+        let idle = format!("{:.1}%", idle_pct(r));
+        let steal = format!("{:.1}/s", r.metrics.steal_rate);
+        println!(
+            "| {:<13} | {:<7} | {:>14} | {:>6} | {:>10} |",
+            r.scheduler, dag_label, throughput, idle, steal
+        );
+    }
+    println!();
+}
+
+fn save_json(results: &[RunMetrics]) {
+    let json = serde_json::to_string_pretty(results).expect("serialize results");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/benchmark_results.json");
+    if let Err(e) = std::fs::write(&path, &json) {
+        eprintln!("warning: could not save benchmark_results.json: {e}");
+    } else {
+        println!("Saved {}", path.display());
+    }
+}
+
+// ── Criterion bench functions ─────────────────────────────────────────────────
+
+fn bench_sequential_uniform(c: &mut Criterion) {
+    let (dag, sources) = build_uniform_dag(CHAIN_LEN, CHAIN_DIM);
     c.bench_function(
-        &format!("static_{N_WORKERS}w_{CHAIN_LEN}op_matmul_chain_{CHAIN_DIM}x{CHAIN_DIM}"),
+        &format!("sequential_uniform_{CHAIN_LEN}op_{CHAIN_DIM}x{CHAIN_DIM}"),
         |b| {
             b.iter(|| {
-                let s = sources.clone();
+                black_box(SequentialExecutor::execute(black_box(&dag), sources.clone()).unwrap().0)
+            })
+        },
+    );
+}
+
+fn bench_static_uniform(c: &mut Criterion) {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(N_WORKERS)
+        .enable_time()
+        .build()
+        .unwrap();
+    let (dag, sources) = build_uniform_dag(CHAIN_LEN, CHAIN_DIM);
+    let sched = StaticScheduler::new(&dag, N_WORKERS);
+    c.bench_function(
+        &format!("static_{N_WORKERS}w_uniform_{CHAIN_LEN}op_{CHAIN_DIM}x{CHAIN_DIM}"),
+        |b| {
+            b.iter(|| {
                 black_box(
-                    rt.block_on(sched.execute(Arc::clone(&dag), s)).unwrap(),
+                    rt.block_on(sched.execute(Arc::clone(&dag), sources.clone())).unwrap().0,
                 )
             })
         },
     );
 }
 
-fn bench_ws_chain(c: &mut Criterion) {
+fn bench_workstealing_uniform(c: &mut Criterion) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(N_WORKERS)
         .enable_time()
         .build()
         .unwrap();
-    let (dag, sources) = build_matmul_chain(CHAIN_LEN, CHAIN_DIM);
+    let (dag, sources) = build_uniform_dag(CHAIN_LEN, CHAIN_DIM);
     let sched = WorkStealingScheduler::new(N_WORKERS);
-
     c.bench_function(
-        &format!("ws_{N_WORKERS}w_{CHAIN_LEN}op_matmul_chain_{CHAIN_DIM}x{CHAIN_DIM}"),
+        &format!("ws_{N_WORKERS}w_uniform_{CHAIN_LEN}op_{CHAIN_DIM}x{CHAIN_DIM}"),
         |b| {
             b.iter(|| {
-                let s = sources.clone();
                 black_box(
-                    rt.block_on(sched.execute(Arc::clone(&dag), s)).unwrap(),
+                    rt.block_on(sched.execute(Arc::clone(&dag), sources.clone())).unwrap().0,
                 )
             })
         },
     );
+}
+
+fn bench_sequential_skewed(c: &mut Criterion) {
+    let (dag, sources) = build_skewed_dag(CHAIN_LEN, SLOW_BRANCH_FACTOR);
+    c.bench_function("sequential_skewed_20op_factor5", |b| {
+        b.iter(|| {
+            black_box(SequentialExecutor::execute(black_box(&dag), sources.clone()).unwrap().0)
+        })
+    });
 }
 
 fn bench_static_skewed(c: &mut Criterion) {
@@ -185,40 +229,61 @@ fn bench_static_skewed(c: &mut Criterion) {
         .enable_time()
         .build()
         .unwrap();
-    let (dag, sources) = build_skewed_dag();
+    let (dag, sources) = build_skewed_dag(CHAIN_LEN, SLOW_BRANCH_FACTOR);
     let sched = StaticScheduler::new(&dag, N_WORKERS);
-
-    c.bench_function("static_4w_skewed_dag", |b| {
+    c.bench_function(&format!("static_{N_WORKERS}w_skewed_20op_factor5"), |b| {
         b.iter(|| {
-            let s = sources.clone();
-            black_box(rt.block_on(sched.execute(Arc::clone(&dag), s)).unwrap())
+            black_box(
+                rt.block_on(sched.execute(Arc::clone(&dag), sources.clone())).unwrap().0,
+            )
         })
     });
 }
 
-fn bench_ws_skewed(c: &mut Criterion) {
+fn bench_workstealing_skewed(c: &mut Criterion) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(N_WORKERS)
         .enable_time()
         .build()
         .unwrap();
-    let (dag, sources) = build_skewed_dag();
+    let (dag, sources) = build_skewed_dag(CHAIN_LEN, SLOW_BRANCH_FACTOR);
     let sched = WorkStealingScheduler::new(N_WORKERS);
-
-    c.bench_function("ws_4w_skewed_dag", |b| {
+    c.bench_function(&format!("ws_{N_WORKERS}w_skewed_20op_factor5"), |b| {
         b.iter(|| {
-            let s = sources.clone();
-            black_box(rt.block_on(sched.execute(Arc::clone(&dag), s)).unwrap())
+            black_box(
+                rt.block_on(sched.execute(Arc::clone(&dag), sources.clone())).unwrap().0,
+            )
         })
     });
 }
 
+// ── Groups ────────────────────────────────────────────────────────────────────
+
 criterion_group!(
-    benches,
-    bench_sequential_chain,
-    bench_static_chain,
-    bench_ws_chain,
-    bench_static_skewed,
-    bench_ws_skewed,
+    uniform_benches,
+    bench_sequential_uniform,
+    bench_static_uniform,
+    bench_workstealing_uniform,
 );
-criterion_main!(benches);
+
+criterion_group!(
+    skewed_benches,
+    bench_sequential_skewed,
+    bench_static_skewed,
+    bench_workstealing_skewed,
+);
+
+// ── Custom main ───────────────────────────────────────────────────────────────
+
+fn main() {
+    // Run Criterion timing (each group creates its own Criterion instance).
+    uniform_benches();
+    skewed_benches();
+
+    // One-shot metrics pass: collect RunMetrics for the comparison table.
+    eprintln!("\nCollecting one-shot metrics for comparison table...");
+    let results = collect_all_metrics();
+
+    print_markdown_table(&results);
+    save_json(&results);
+}

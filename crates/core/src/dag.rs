@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use thiserror::Error;
 
-use crate::op::{Op, OpId};
+use crate::op::{Op, OpId, OpKind};
+use crate::tensor::Tensor;
 
 /// Errors produced by [`Dag`] construction or traversal.
 #[derive(Debug, Error)]
@@ -119,6 +120,50 @@ impl Dag {
     /// Returns `true` if the DAG contains no ops.
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
+    }
+
+    /// Builds a two-branch skewed DAG for benchmark skew-injection.
+    ///
+    /// Structure (total `2 + n_ops` ops):
+    /// - Op 0: fast-branch source (no inputs, pre-populated as a source tensor).
+    /// - Op 1: slow-branch source (no inputs, pre-populated as a source tensor).
+    /// - Ops `2 .. 2 + half`: fast branch — each `Slow(1 ms)`, all depending only on op 0.
+    /// - Ops `2 + half .. 2 + n_ops`: slow branch — each `Slow(slow_branch_factor ms)`,
+    ///   all depending only on op 1.
+    ///
+    /// Returns `(dag, source_tensors)` where `source_tensors` contains the pre-built
+    /// tensors for ops 0 and 1.
+    ///
+    /// # Errors
+    /// Returns [`DagError`] if the DAG construction fails (should never occur for
+    /// well-formed inputs).
+    pub fn with_skew(
+        n_ops: usize,
+        slow_branch_factor: u64,
+    ) -> Result<(Self, HashMap<OpId, Tensor>), DagError> {
+        assert!(n_ops >= 2 && n_ops % 2 == 0, "n_ops must be a positive even number");
+        let half = n_ops / 2;
+        let mut ops: Vec<Op> = Vec::with_capacity(2 + n_ops);
+
+        ops.push(Op::new(0, OpKind::Relu { len: 1 }, vec![], vec![1]));
+        ops.push(Op::new(1, OpKind::Relu { len: 1 }, vec![], vec![1]));
+
+        for i in 0..half {
+            ops.push(Op::new(2 + i, OpKind::Slow { duration_ms: 1 }, vec![0], vec![1]));
+        }
+        for i in 0..half {
+            ops.push(Op::new(
+                2 + half + i,
+                OpKind::Slow { duration_ms: slow_branch_factor },
+                vec![1],
+                vec![1],
+            ));
+        }
+
+        let dag = Self::new(ops)?;
+        let sources =
+            HashMap::from([(0, Tensor::full(&[1], 1.0)), (1, Tensor::full(&[1], 1.0))]);
+        Ok((dag, sources))
     }
 }
 

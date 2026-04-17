@@ -64,7 +64,51 @@ This makes the scheduler reactive under load (fast wake on completion) while sti
 
 ---
 
-_Week 3 results pending — Narval multi-node runs._
+### 2026-04-17 — Skew injection + criterion comparison table (Week 3, Session 2)
+
+- **Machine:** Apple M-series dev laptop (local, single node, no MPI)
+- **Commit:** Week 3 Session 2 (skew injection + new bench groups)
+- **Nodes:** 1  |  **Workers:** 4 tokio tasks  |  **Rust:** 1.91 (local)
+- **Benchmark harness:** Criterion 0.5, 100 samples each; one-shot RunMetrics pass for table
+- **JSON results saved to:** `docs/benchmark_results.json`
+
+#### DAG topologies
+
+- **Uniform:** 20-op linear matmul chain (128×128).  Inherently sequential — no parallelism gain expected.
+- **Skewed:** 22-op two-branch DAG (`Dag::with_skew(20, 5)`).
+  - Branch A (fast): 10 independent `Slow(1 ms)` ops, all fan-out from source 0.
+  - Branch B (slow): 10 independent `Slow(5 ms)` ops, all fan-out from source 1.
+  - Sequential total ≈ 60–75 ms; round-robin distributes ~5 ops/worker.
+
+#### Criterion timing (median, 100 samples)
+
+| Benchmark | Median |
+|-----------|--------|
+| sequential_uniform_20op_128x128 | **1.10 ms** |
+| static_4w_uniform_20op_128x128 | 1.39 ms |
+| ws_4w_uniform_20op_128x128 | 1.46 ms |
+| sequential_skewed_20op_factor5 | **74.0 ms** |
+| static_4w_skewed_20op_factor5 | 21.3 ms |
+| ws_4w_skewed_20op_factor5 | 21.2 ms |
+
+#### One-shot RunMetrics comparison table
+
+| Scheduler     | DAG     | Throughput  | Idle%  | Steal Rate |
+|---------------|---------|-------------|--------|------------|
+| sequential    | uniform | 17 145 ops/s |  0.0% |      0.0/s |
+| static        | uniform | 14 099 ops/s | 64.1% |      0.0/s |
+| work-stealing | uniform | 16 087 ops/s | 66.3% |      0.0/s |
+| sequential    | skewed  |    268 ops/s |  0.0% |      0.0/s |
+| static        | skewed  |    935 ops/s |  0.0% |      0.0/s |
+| work-stealing | skewed  |    935 ops/s | 11.5% |      0.0/s |
+
+#### Key observations
+
+- **Uniform DAG:** All schedulers produce ~1–1.5 ms because the chain is inherently serial (each op depends on the previous). Static and WS add coordination overhead (~30–40%) with no parallelism gain. Expected.
+- **Skewed DAG:** Parallel schedulers achieve ~3.5× speedup over sequential (74 ms → 21 ms). Both static and work-stealing reach the same wall time on this DAG because round-robin assignment already distributes the `Slow` ops across all four workers without a gross imbalance. The steal threshold of 2 prevents stealing from queues with ≤ 2 remaining ops, which is sufficient here.
+- **No successful steals on skewed DAG:** The two-branch fan-out structure means all ops are immediately ready (all depend only on pre-populated sources). Workers exhaust their own queues before the queues of others fall below the steal threshold. The 15 steal attempts but 0 successes confirm the threshold is the bottleneck. Lowering `STEAL_THRESHOLD` or using a more extreme imbalance would surface work-stealing's benefit — planned for the Narval multi-node runs.
+
+_Full multi-node scaling results (4 / 8 / 16 / 32 nodes) pending Narval runs._
 
 ## 2026-04-16T21:34:44-04:00  job=59467408
 - nodes: 2
@@ -72,3 +116,14 @@ _Week 3 results pending — Narval multi-node runs._
 - threads/rank: 32
 - exit: 0
 - git: f3f0ccc
+
+## Criterion Timing
+
+  | Scheduler     | DAG     |     Throughput | Idle%  | Steal Rate |      
+  |---------------|---------|----------------|--------|------------|      
+  | sequential    | uniform |    17145 ops/s |   0.0% |      0.0/s |
+  | static        | uniform |    14099 ops/s |  64.1% |      0.0/s |      
+  | work-stealing | uniform |    16087 ops/s |  66.3% |      0.0/s |      
+  | sequential    | skewed  |      268 ops/s |   0.0% |      0.0/s |      
+  | static        | skewed  |      935 ops/s |   0.0% |      0.0/s |      
+  | work-stealing | skewed  |      935 ops/s |  11.5% |      0.0/s | 

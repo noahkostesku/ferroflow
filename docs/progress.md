@@ -2,7 +2,7 @@
 
 > Check this file at the start of every session to orient on current status.
 
-Last updated: 2026-04-16
+Last updated: 2026-04-17 (Week 3 Session 2)
 
 ---
 
@@ -41,11 +41,16 @@ _Target: 2026-04-27_
 ## Week 3 — Benchmarking, Skew Injection, Tuning
 _Target: 2026-05-04_
 
-- [ ] Implement skew injection in benchmark harness (10% of ops at 10× cost)
+- [x] Metrics types: `SchedulerMetrics` + `RunMetrics` in `crates/core/src/metrics.rs` (serde, Display, 5 unit tests)
+- [x] Instrument `SequentialExecutor` — returns `(HashMap, SchedulerMetrics)`; elapsed_ms timing
+- [x] Instrument `StaticScheduler` — per-worker idle time via `std::time::Instant`; returns `(HashMap, SchedulerMetrics)`
+- [x] Instrument `WorkStealingScheduler` — `AtomicU64` steal_attempts/successful_steals; per-worker idle time; returns `(HashMap, SchedulerMetrics)`
+- [x] Implement skew injection: `OpKind::Slow { duration_ms }` + `Dag::with_skew(n_ops, factor)`
+- [x] Criterion bench groups: `sequential/static/ws × uniform/skewed` (6 benches) with custom main
+- [x] Collect worker utilization and steal-rate metrics via `RunMetrics` in one-shot pass
+- [x] Log results to `docs/benchmarks.md`; JSON saved to `docs/benchmark_results.json`
 - [ ] Run static vs. work-stealing on 4, 8, 16, 32 nodes (balanced DAG)
 - [ ] Run static vs. work-stealing on 4, 8, 16, 32 nodes (skewed DAG)
-- [ ] Collect worker utilization and steal-rate metrics
-- [ ] Log results to `docs/benchmarks.md`
 - [ ] Profile coordinator bottleneck (is it the bottleneck at 32+ nodes?)
 - [ ] Tune backoff strategy in worker steal loop
 - [ ] Tune rayon thread pool size vs. `$SLURM_CPUS_PER_TASK`
@@ -74,3 +79,5 @@ _Target: 2026-05-11_
 - **2026-04-16:** `MpiWorker` in `crates/runtime/src/mpi_worker.rs` (Week 2 Session 3). Coordinator event loop + worker steal loop over MPI point-to-point, bincode messages, exponential backoff on StealNone, shutdown drain. Diamond DAG integration test skips gracefully without mpirun.
 - **Benchmark baseline (local, unoptimised HW):** 20-op 128×128 matmul chain ≈ 1.02 ms. Re-run on Narval compute node for the canonical result.
 - **Week 1 remaining:** CI setup (clippy in GH Actions). All code complete.
+- **2026-04-17:** Week 3 Session 1. Metrics layer added to `ferroflow-core`. All three schedulers now return `(HashMap<OpId, Tensor>, SchedulerMetrics)`. Benches updated to `.unwrap().0`. 32/32 tests pass.
+- **2026-04-17:** Week 3 Session 2. `OpKind::Slow { duration_ms }` added to core; `Dag::with_skew(n_ops, factor)` constructor builds two-branch skewed DAG. Bench rewritten with 6 functions across 2 groups + custom `main` that prints RunMetrics comparison table and saves `docs/benchmark_results.json`. 33/33 tests pass. Key local results: uniform DAG ~1.1 ms sequential / ~1.4 ms parallel (chain serial, no parallelism); skewed DAG ~74 ms sequential / ~21 ms static+WS (3.5× speedup). Steal threshold prevents stealing on this fan-out topology — real WS benefit expected at Narval scale.

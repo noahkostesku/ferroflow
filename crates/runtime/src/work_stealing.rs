@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use ferroflow_core::{ops::execute_op, Dag, OpId, Tensor};
+use ferroflow_core::{ops::execute_op, Dag, OpId, SchedulerMetrics, Tensor};
 use tokio::sync::{watch, Mutex};
 
 use crate::static_scheduler::SchedulerError;
@@ -41,7 +42,8 @@ impl WorkStealingScheduler {
     /// (round-robin by `op_id % n_workers`).  Workers steal from victims when
     /// idle, choosing the first victim whose queue exceeds the steal threshold.
     ///
-    /// Returns the complete `HashMap<OpId, Tensor>` after all ops finish.
+    /// Returns the complete tensor store and execution metrics after all ops
+    /// finish.
     ///
     /// # Errors
     /// Returns [`WorkStealingError`] if any op fails.
@@ -49,21 +51,20 @@ impl WorkStealingScheduler {
         &self,
         dag: Arc<Dag>,
         source_tensors: HashMap<OpId, Tensor>,
-    ) -> Result<HashMap<OpId, Tensor>, WorkStealingError> {
+    ) -> Result<(HashMap<OpId, Tensor>, SchedulerMetrics), WorkStealingError> {
         let n = self.n_workers;
+        let total_ops =
+            dag.ops.iter().filter(|op| !op.input_ids.is_empty()).count() as u64;
 
         // Build per-worker queues with round-robin initial assignment.
         let queues: Arc<Vec<WorkQueue>> = Arc::new((0..n).map(|_| WorkQueue::new()).collect());
-        let total_compute = {
-            let mut count = 0usize;
+        {
             for op in &dag.ops {
                 if !op.input_ids.is_empty() {
                     queues[op.id % n].push(op.id).await;
-                    count += 1;
                 }
             }
-            count
-        };
+        }
 
         let store: Arc<Mutex<HashMap<OpId, Tensor>>> =
             Arc::new(Mutex::new(source_tensors));
@@ -71,9 +72,11 @@ impl WorkStealingScheduler {
         let (version_tx, version_rx) = watch::channel(0usize);
         let version_tx = Arc::new(version_tx);
 
-        // Shared completion counter to detect when all ops are done.
-        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let completed = Arc::new(AtomicU64::new(0));
+        let steal_attempts = Arc::new(AtomicU64::new(0));
+        let successful_steals = Arc::new(AtomicU64::new(0));
 
+        let t0 = Instant::now();
         let mut handles = Vec::with_capacity(n);
 
         for worker_id in 0..n {
@@ -83,12 +86,16 @@ impl WorkStealingScheduler {
             let version_tx = Arc::clone(&version_tx);
             let mut version_rx = version_rx.clone();
             let completed = Arc::clone(&completed);
+            let steal_attempts = Arc::clone(&steal_attempts);
+            let successful_steals = Arc::clone(&successful_steals);
 
+            // Task returns idle microseconds accumulated by this worker.
             handles.push(tokio::spawn(async move {
                 let mut attempt = 0usize;
+                let mut idle_micros: u64 = 0;
 
                 loop {
-                    if completed.load(std::sync::atomic::Ordering::Acquire) >= total_compute {
+                    if completed.load(Ordering::Acquire) >= total_ops {
                         break;
                     }
 
@@ -100,9 +107,11 @@ impl WorkStealingScheduler {
                             let mut stolen = None;
                             for offset in 1..n {
                                 let victim = (worker_id + offset) % n;
+                                steal_attempts.fetch_add(1, Ordering::Relaxed);
                                 if let Some(id) =
                                     queues[victim].steal_if_above(STEAL_THRESHOLD).await
                                 {
+                                    successful_steals.fetch_add(1, Ordering::Relaxed);
                                     stolen = Some(id);
                                     break;
                                 }
@@ -115,12 +124,11 @@ impl WorkStealingScheduler {
                                 None => {
                                     // Back off: wait for any op to complete (wakes up
                                     // reactively via version channel) or for the maximum
-                                    // backoff window to expire (10–50 ms).  The select
-                                    // ensures workers are responsive when work becomes
-                                    // available while still capping retry frequency.
+                                    // backoff window to expire (10–50 ms).
                                     let backoff_ms =
                                         10 + ((worker_id * 13 + attempt * 7) % 41) as u64;
                                     attempt += 1;
+                                    let tw = Instant::now();
                                     tokio::select! {
                                         biased;
                                         _ = version_rx.changed() => {}
@@ -128,6 +136,7 @@ impl WorkStealingScheduler {
                                             Duration::from_millis(backoff_ms)
                                         ) => {}
                                     }
+                                    idle_micros += tw.elapsed().as_micros() as u64;
                                     continue;
                                 }
                             }
@@ -145,7 +154,9 @@ impl WorkStealingScheduler {
                         if ready {
                             break;
                         }
+                        let tw = Instant::now();
                         version_rx.changed().await.ok();
+                        idle_micros += tw.elapsed().as_micros() as u64;
                     }
 
                     let op = dag.get_op(op_id).expect("valid op id");
@@ -160,22 +171,29 @@ impl WorkStealingScheduler {
                     {
                         store.lock().await.insert(op_id, result);
                     }
-                    completed.fetch_add(1, std::sync::atomic::Ordering::Release);
+                    completed.fetch_add(1, Ordering::Release);
                     version_tx.send_modify(|v| *v += 1);
                 }
 
-                Ok::<(), WorkStealingError>(())
+                Ok::<u64, WorkStealingError>(idle_micros)
             }));
         }
 
+        let mut total_idle_micros: u64 = 0;
         for handle in handles {
-            handle.await.expect("worker task panicked")?;
+            total_idle_micros += handle.await.expect("worker task panicked")?;
         }
+
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let idle_time_ms = total_idle_micros as f64 / 1000.0;
+        let sa = steal_attempts.load(Ordering::Relaxed);
+        let ss = successful_steals.load(Ordering::Relaxed);
+        let metrics = SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, sa, ss);
 
         let store = Arc::try_unwrap(store)
             .expect("all worker handles dropped")
             .into_inner();
-        Ok(store)
+        Ok((store, metrics))
     }
 }
 
@@ -198,10 +216,12 @@ mod tests {
         let mut sources = HashMap::new();
         sources.insert(0usize, Tensor::from_shape_vec(&[4], vec![-3., -1., 0., 2.]).unwrap());
 
-        let results = sched.execute(dag, sources).await.unwrap();
+        let (results, metrics) = sched.execute(dag, sources).await.unwrap();
         let out: Vec<f32> = results[&3].data.iter().copied().collect();
         assert!(out.iter().all(|&v| v >= 0.0));
         assert_eq!(out[3], 2.0);
+        assert_eq!(metrics.total_ops, 3);
+        assert!(metrics.elapsed_ms >= 0.0);
     }
 
     #[tokio::test]
@@ -219,7 +239,7 @@ mod tests {
         let mut sources = HashMap::new();
         sources.insert(0usize, Tensor::full(&[4], 1.0));
 
-        let results = sched.execute(dag, sources).await.unwrap();
+        let (results, _) = sched.execute(dag, sources).await.unwrap();
         assert_eq!(results.len(), 5);
     }
 
@@ -237,7 +257,7 @@ mod tests {
         sources.insert(0usize, Tensor::from_shape_vec(&[2, 2], vec![1., 0., 0., 1.]).unwrap());
         sources.insert(1usize, Tensor::from_shape_vec(&[2, 2], vec![1., 2., 3., 4.]).unwrap());
 
-        let results = sched.execute(dag, sources).await.unwrap();
+        let (results, _) = sched.execute(dag, sources).await.unwrap();
         let flat: Vec<f32> = results[&2].data.iter().copied().collect();
         assert_eq!(flat, vec![1., 2., 3., 4.]);
     }

@@ -44,6 +44,11 @@ pub fn execute_op(op: &Op, tensors: &[&Tensor]) -> Result<Tensor, OpError> {
             require_inputs("reduce", tensors, 1)?;
             reduce(tensors[0], *axis)
         }
+        OpKind::Slow { duration_ms } => {
+            require_inputs("slow", tensors, 1)?;
+            std::thread::sleep(std::time::Duration::from_millis(*duration_ms));
+            Ok(tensors[0].clone())
+        }
     }
 }
 
@@ -186,6 +191,16 @@ mod tests {
         let x = Tensor::from_shape_vec(&[2, 2], vec![0.; 4]).unwrap();
         let result = execute_op(&op(OpKind::Reduce { axis: 5, len: 4 }), &[&x]);
         assert!(matches!(result, Err(OpError::ShapeMismatch(_))));
+    }
+
+    // ── slow ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn slow_passes_through_input() {
+        let x = Tensor::from_shape_vec(&[3], vec![1., 2., 3.]).unwrap();
+        let out = execute_op(&op(OpKind::Slow { duration_ms: 0 }), &[&x]).unwrap();
+        let flat: Vec<f32> = out.data.iter().copied().collect();
+        assert_eq!(flat, vec![1., 2., 3.]);
     }
 
     // ── arity guard ─────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ pub mod worker;
 pub mod mpi_worker;
 
 pub use executor::{ExecutorError, SequentialExecutor};
+pub use ferroflow_core::{RunMetrics, SchedulerMetrics};
 pub use static_scheduler::{SchedulerError, StaticScheduler};
 pub use work_stealing::WorkStealingScheduler;
 pub use worker::{Message, WorkQueue, WorkerId, WorkerTrait};

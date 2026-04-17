@@ -20,6 +20,7 @@ mpi            = { workspace = true, optional = true }
 criterion      = { workspace = true }
 ferroflow-core = { workspace = true }
 ndarray        = { workspace = true }
+serde_json     = "1"
 
 [[bench]]
 name    = "dag_bench"

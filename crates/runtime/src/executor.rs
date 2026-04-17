@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
-use ferroflow_core::{ops::execute_op, Dag, DagError, OpError, OpId, Tensor};
+use ferroflow_core::{ops::execute_op, Dag, DagError, OpError, OpId, SchedulerMetrics, Tensor};
 use thiserror::Error;
 
 /// Errors returned by [`SequentialExecutor::execute`].
@@ -42,7 +43,8 @@ impl SequentialExecutor {
     /// `source_tensors` must contain a [`Tensor`] for every source op (an op
     /// with no `input_ids`). All other tensors are computed on demand.
     ///
-    /// Returns the complete `HashMap<OpId, Tensor>` after the full DAG has run.
+    /// Returns the complete tensor store and execution metrics after the full
+    /// DAG has run.
     ///
     /// # Errors
     /// Returns [`ExecutorError`] on DAG cycles, missing source tensors, or op
@@ -50,9 +52,13 @@ impl SequentialExecutor {
     pub fn execute(
         dag: &Dag,
         source_tensors: HashMap<OpId, Tensor>,
-    ) -> Result<HashMap<OpId, Tensor>, ExecutorError> {
+    ) -> Result<(HashMap<OpId, Tensor>, SchedulerMetrics), ExecutorError> {
+        let total_ops = dag.ops.iter().filter(|op| !op.input_ids.is_empty()).count() as u64;
         let order = dag.topological_sort()?;
         let mut store: HashMap<OpId, Tensor> = source_tensors;
+
+        let t0 = Instant::now();
+        let mut completed_ops: u64 = 0;
 
         for op_id in order {
             // Source ops are already in the store — skip execution.
@@ -77,9 +83,12 @@ impl SequentialExecutor {
                 .map_err(|source| ExecutorError::OpFailed { op_id, op_name, source })?;
 
             store.insert(op_id, output);
+            completed_ops += 1;
         }
 
-        Ok(store)
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let metrics = SchedulerMetrics::new(total_ops, completed_ops, elapsed_ms, 0.0, 0, 0);
+        Ok((store, metrics))
     }
 }
 
@@ -89,6 +98,7 @@ fn op_kind_name(kind: &ferroflow_core::OpKind) -> &'static str {
         ferroflow_core::OpKind::Relu { .. } => "relu",
         ferroflow_core::OpKind::LayerNorm { .. } => "layer_norm",
         ferroflow_core::OpKind::Reduce { .. } => "reduce",
+        ferroflow_core::OpKind::Slow { .. } => "slow",
     }
 }
 
@@ -115,7 +125,7 @@ mod tests {
         let mut sources = HashMap::new();
         sources.insert(0usize, source);
 
-        let results = SequentialExecutor::execute(&dag, sources).unwrap();
+        let (results, _) = SequentialExecutor::execute(&dag, sources).unwrap();
 
         let out: Vec<f32> = results[&3].data.iter().copied().collect();
         assert!(out.iter().all(|&v| v >= 0.0), "relu output must be non-negative: {out:?}");
@@ -139,7 +149,7 @@ mod tests {
         sources.insert(0usize, Tensor::from_shape_vec(&[2, 2], vec![1., 0., 0., 1.]).unwrap());
         sources.insert(1usize, Tensor::from_shape_vec(&[2, 2], vec![1., 2., 3., 4.]).unwrap());
 
-        let results = SequentialExecutor::execute(&dag, sources).unwrap();
+        let (results, _) = SequentialExecutor::execute(&dag, sources).unwrap();
         let flat: Vec<f32> = results[&2].data.iter().copied().collect();
         assert_eq!(flat, vec![1., 2., 3., 4.]);
     }
@@ -159,7 +169,7 @@ mod tests {
         let mut sources = HashMap::new();
         sources.insert(0usize, Tensor::full(&[8], 1.0));
 
-        let results = SequentialExecutor::execute(&dag, sources).unwrap();
+        let (results, _) = SequentialExecutor::execute(&dag, sources).unwrap();
         assert_eq!(results.len(), n);
     }
 }

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
-use ferroflow_core::{ops::execute_op, Dag, DagError, OpError, OpId, Tensor};
+use ferroflow_core::{ops::execute_op, Dag, DagError, OpError, OpId, SchedulerMetrics, Tensor};
 use thiserror::Error;
 use tokio::sync::{watch, Mutex};
 
@@ -52,7 +53,8 @@ impl StaticScheduler {
     /// Each worker processes its pre-assigned ops in op-ID order, waiting for
     /// dependency tensors to appear in the shared store before executing.
     ///
-    /// Returns the complete `HashMap<OpId, Tensor>` after all ops finish.
+    /// Returns the complete tensor store and execution metrics after all ops
+    /// finish.
     ///
     /// # Errors
     /// Returns [`SchedulerError`] if any op fails.
@@ -60,7 +62,10 @@ impl StaticScheduler {
         &self,
         dag: Arc<Dag>,
         source_tensors: HashMap<OpId, Tensor>,
-    ) -> Result<HashMap<OpId, Tensor>, SchedulerError> {
+    ) -> Result<(HashMap<OpId, Tensor>, SchedulerMetrics), SchedulerError> {
+        let total_ops =
+            dag.ops.iter().filter(|op| !op.input_ids.is_empty()).count() as u64;
+
         let store: Arc<Mutex<HashMap<OpId, Tensor>>> =
             Arc::new(Mutex::new(source_tensors));
 
@@ -69,6 +74,7 @@ impl StaticScheduler {
         let (version_tx, version_rx) = watch::channel(0usize);
         let version_tx = Arc::new(version_tx);
 
+        let t0 = Instant::now();
         let mut handles = Vec::with_capacity(self.n_workers);
 
         for worker_id in 0..self.n_workers {
@@ -78,7 +84,10 @@ impl StaticScheduler {
             let version_tx = Arc::clone(&version_tx);
             let mut version_rx = version_rx.clone();
 
+            // Task returns idle microseconds accumulated by this worker.
             handles.push(tokio::spawn(async move {
+                let mut idle_micros: u64 = 0;
+
                 for op_id in assigned {
                     // Mark the version we have seen before the readiness check so that
                     // `changed()` below detects any completion that races with the check.
@@ -92,7 +101,9 @@ impl StaticScheduler {
                         if ready {
                             break;
                         }
+                        let tw = Instant::now();
                         version_rx.changed().await.ok();
+                        idle_micros += tw.elapsed().as_micros() as u64;
                     }
 
                     let op = dag.get_op(op_id).expect("valid op id");
@@ -110,18 +121,24 @@ impl StaticScheduler {
                     // Notify all waiting workers that a new tensor is available.
                     version_tx.send_modify(|v| *v += 1);
                 }
-                Ok::<(), SchedulerError>(())
+                Ok::<u64, SchedulerError>(idle_micros)
             }));
         }
 
+        let mut total_idle_micros: u64 = 0;
         for handle in handles {
-            handle.await.expect("worker task panicked")?;
+            total_idle_micros += handle.await.expect("worker task panicked")?;
         }
+
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let idle_time_ms = total_idle_micros as f64 / 1000.0;
+        let metrics =
+            SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, 0, 0);
 
         let store = Arc::try_unwrap(store)
             .expect("all worker handles dropped")
             .into_inner();
-        Ok(store)
+        Ok((store, metrics))
     }
 }
 
@@ -144,10 +161,12 @@ mod tests {
         let mut sources = HashMap::new();
         sources.insert(0usize, Tensor::from_shape_vec(&[4], vec![-3., -1., 0., 2.]).unwrap());
 
-        let results = sched.execute(dag, sources).await.unwrap();
+        let (results, metrics) = sched.execute(dag, sources).await.unwrap();
         let out: Vec<f32> = results[&3].data.iter().copied().collect();
         assert!(out.iter().all(|&v| v >= 0.0));
         assert_eq!(out[3], 2.0);
+        assert_eq!(metrics.total_ops, 3);
+        assert_eq!(metrics.steal_attempts, 0);
     }
 
     #[tokio::test]
@@ -166,7 +185,7 @@ mod tests {
         let mut sources = HashMap::new();
         sources.insert(0usize, Tensor::full(&[4], 1.0));
 
-        let results = sched.execute(dag, sources).await.unwrap();
+        let (results, _) = sched.execute(dag, sources).await.unwrap();
         assert_eq!(results.len(), 5);
         for id in 1..=4 {
             let out: Vec<f32> = results[&id].data.iter().copied().collect();
@@ -191,7 +210,7 @@ mod tests {
         sources.insert(0usize, Tensor::from_shape_vec(&[2, 2], vec![1., 0., 0., 1.]).unwrap());
         sources.insert(1usize, Tensor::from_shape_vec(&[2, 2], vec![1., 2., 3., 4.]).unwrap());
 
-        let results = sched.execute(dag, sources).await.unwrap();
+        let (results, _) = sched.execute(dag, sources).await.unwrap();
         let flat: Vec<f32> = results[&2].data.iter().copied().collect();
         assert_eq!(flat, vec![1., 2., 3., 4.]);
     }

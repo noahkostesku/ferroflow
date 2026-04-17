@@ -15,6 +15,9 @@ pub enum OpKind {
     LayerNorm { len: usize },
     /// Sum-reduction along a single axis.
     Reduce { axis: usize, len: usize },
+    /// Artificial delay: sleeps for `duration_ms` milliseconds then passes the
+    /// single input tensor through unchanged.  Used for skew injection in benchmarks.
+    Slow { duration_ms: u64 },
 }
 
 impl OpKind {
@@ -26,6 +29,7 @@ impl OpKind {
             OpKind::Matmul { m, n, k } => (m * n * k) as u64,
             OpKind::Relu { len } | OpKind::LayerNorm { len } => *len as u64,
             OpKind::Reduce { len, .. } => *len as u64,
+            OpKind::Slow { duration_ms } => *duration_ms,
         }
     }
 }
