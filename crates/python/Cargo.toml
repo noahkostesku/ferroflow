@@ -1,0 +1,15 @@
+[package]
+name    = "ferroflow-python"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name       = "ferroflow"
+crate-type = ["cdylib"]
+
+[dependencies]
+ferroflow-core    = { workspace = true }
+ferroflow-runtime = { workspace = true }
+pyo3   = { version = "0.21", features = ["extension-module"] }
+numpy  = "0.21"
+tokio  = { workspace = true }

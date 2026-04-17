@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/core", "crates/runtime"]
+members = [".", "crates/core", "crates/runtime", "crates/python"]
 exclude = ["mpi-hello"]
 resolver = "2"
 
@@ -46,6 +46,7 @@ distributed = [
     "ferroflow-core/distributed",
     "ferroflow-runtime/distributed",
 ]
+python = []
 
 [profile.release]
 opt-level = 3
