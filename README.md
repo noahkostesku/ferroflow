@@ -150,22 +150,21 @@ Execution uses zero-filled source tensors so any correctly-shaped model runs wit
 ```bash
 cd ferroflow
 maturin develop -m crates/python/Cargo.toml
-```
 
-```python
+python - <<'EOF'
 import ferroflow
 
 dag = ferroflow.DAG()
-src = dag.matmul(input_ids=[], shape=[128, 128])   # source tensor
-h1  = dag.relu(input_ids=[src], shape=[128, 128])  # relu
-out = dag.matmul(input_ids=[h1], shape=[128, 128]) # matmul
+a   = dag.matmul(m=128, n=128, k=128, inputs=[])
+b   = dag.relu(len=128*128, inputs=[a])
+c   = dag.matmul(m=128, n=128, k=128, inputs=[a, b])
 
-# Returns dict[int, list[float]]: op_id → output tensor (flat)
-results = ferroflow.run(dag, workers=4)
-print(f"output shape hint: {len(results[out])} elements")
+metrics = ferroflow.run(dag, workers=4)
+print(metrics)
+EOF
 ```
 
-`run()` returns a `dict` mapping each op ID to its output tensor as a flat `list[float]`. Source ops (empty `input_ids`) are pre-populated with ones tensors.
+Build ops, call `run()`, and inspect the returned metrics dict.
 
 ---
 
@@ -194,8 +193,16 @@ Full methodology and per-run notes are in [`docs/benchmarks.md`](docs/benchmarks
 |-----------|-------|-----|-----------|-------|
 | mpi-static | 2 | uniform | 20 ops/s | 0% |
 | mpi-work-stealing | 2 | uniform | 20 ops/s | 0% |
-| mpi-static | 4 | skewed | 17 ops/s | 43% |
-| mpi-work-stealing | 4 | skewed | 18 ops/s | 45% |
+| mpi-static | 2 | skewed | 6.7 ops/s | 0% |
+| mpi-work-stealing | 2 | skewed | 6.7 ops/s | 0% |
+| mpi-static | 4 | uniform | 56.3 ops/s | 23% |
+| mpi-work-stealing | 4 | uniform | 56.3 ops/s | 23% |
+| mpi-static | 4 | skewed | 17.3 ops/s | 43% |
+| mpi-work-stealing | 4 | skewed | 18.1 ops/s | 45% |
+
+**Uniform:** going from 2 → 4 nodes yields ~2.8× throughput improvement (20 → 56 ops/s), with ~23% idle from coordination overhead. Static and work-stealing are indistinguishable at this DAG size.
+
+**Skewed:** at 4 nodes, work-stealing edges out static by ~4.5% (18.1 vs 17.3 ops/s). At 2 nodes the DAG is too small to expose imbalance — both schedulers stall on the slow branch without stealing. The work-stealing advantage is expected to grow significantly at larger node counts and DAG sizes where round-robin can't accidentally balance the load.
 
 Multi-node results are preliminary (small synthetic DAG, `Slow` ops). Full scaling runs (4 → 256 nodes, larger tensor workloads) are planned.
 
@@ -245,7 +252,6 @@ See [`docs/architecture.md`](docs/architecture.md) for the full design.
 - **All public API items must have `///` doc comments.** Run `cargo doc --no-deps` to check.
 - **Clippy is enforced.** The CI target is `clippy -D warnings`.
 - **SLURM scripts live in `slurm/`.** Never scatter job scripts across the repo; never hardcode node counts (use `$SLURM_NNODES`).
-- See [`CLAUDE.md`](CLAUDE.md) for the full contributor/agent orientation, including the session-start checklist.
 
 ---
 
@@ -257,7 +263,6 @@ See [`docs/architecture.md`](docs/architecture.md) for the full design.
 | [`docs/progress.md`](docs/progress.md) | Session-by-session milestone checklist |
 | [`docs/benchmarks.md`](docs/benchmarks.md) | Dated, commit-tagged benchmark log |
 | [`docs/narval-setup.md`](docs/narval-setup.md) | Cluster environment, module stack, job hints |
-| [`CLAUDE.md`](CLAUDE.md) | Contributor and AI-agent orientation |
 
 ---
 
