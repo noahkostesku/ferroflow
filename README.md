@@ -187,6 +187,22 @@ Full methodology and per-run notes are in [`docs/benchmarks.md`](docs/benchmarks
 
 **Skewed fan-out:** both parallel schedulers achieve **~3.5× speedup** over sequential. Work-stealing and static tie here because round-robin already distributes the skewed ops across all 4 workers on this small DAG. The benefit of stealing over static becomes significant at larger scales where imbalance can't be anticipated.
 
+### Narval strong scaling (2–8 nodes)
+
+![Throughput scaling](docs/plots/scaling_throughput.png)
+![Parallel efficiency](docs/plots/scaling_efficiency.png)
+
+| DAG | Nodes | Static (ops/s) | WS (ops/s) | WS Efficiency |
+|-----|-------|---------------|-----------|--------------|
+| transformer | 2 | 2234 | 1886 | 1.000 |
+| transformer | 4 | 2476 | 1549 | 0.411 |
+| transformer | 8 | 2510 | 1496 | 0.198 |
+| wide-skewed | 2 | 2896 | 2877 | 1.000 |
+| wide-skewed | 4 | 3129 | 3057 | 0.531 |
+| wide-skewed | 8 | 3128 | 3021 | 0.263 |
+
+Both schedulers plateau quickly beyond 4 nodes because the current DAG sizes (18–81 ops) are too small to keep all workers busy at 32 threads/rank — efficiency drops below 0.7 at 4 nodes for both workloads. Static slightly outperforms work-stealing across all configurations because worker queues are never exhausted (steal rate = 0 for all runs), so WS pays coordination overhead without any load-rebalancing benefit. The efficiency collapse indicates that the next experiment must use larger DAGs (500+ ops) or a reduced thread count per rank to create the queue starvation that triggers meaningful stealing. Once steal rate rises, WS is expected to recover efficiency advantage on the wide-skewed DAG where static round-robin cannot anticipate operator cost variance.
+
 ### Narval multi-node (via MPI, Narval job 59471496)
 
 | Scheduler | Nodes | DAG | Throughput | Idle% |
