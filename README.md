@@ -109,6 +109,19 @@ See [docs/narval-setup.md](docs/narval-setup.md) for full environment notes and 
 
 ---
 
+## Roadmap
+
+Open issues are tracked on GitHub. Current priorities:
+
+1. Larger DAGs to fully validate work-stealing at scale (#1)
+2. Adaptive steal threshold (#2)  
+3. Peer-to-peer stealing to remove coordinator bottleneck (#3)
+4. Additional ONNX ops: Conv2d, BatchNorm, Softmax (#4)
+5. CUDA support on Narval A100s (#5)
+6. Multi-cluster benchmarks: Fir, Rorqual (#6)
+
+---
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Run `cargo test --workspace` and `cargo clippy --workspace -- -D warnings` before opening a PR.
