@@ -2,7 +2,7 @@
 
 A distributed **tensor DAG** scheduler that compares **work-stealing** against **static round-robin partitioning** on skewed workloads. The research target is [Narval](https://docs.alliancecan.ca/wiki/Narval) (Alliance Canada HPC cluster); all schedulers run locally too, with no cluster required.
 
-> **Status:** active research codebase — implementation and benchmarks are in progress. See [`docs/progress.md`](docs/progress.md) for the current milestone checklist.
+> **Status:** v0.1.0 — initial release. See [`docs/progress.md`](docs/progress.md) for the milestone checklist and [`CHANGELOG.md`](CHANGELOG.md) for what's included.
 
 ---
 
@@ -65,7 +65,7 @@ All other dependencies are pulled from crates.io and managed by Cargo.
 ## Quick start (local, no MPI)
 
 ```bash
-git clone https://github.com/your-org/ferroflow
+git clone https://github.com/noahkostesku/ferroflow
 cd ferroflow
 
 cargo build --release
@@ -318,4 +318,4 @@ See [`docs/architecture.md`](docs/architecture.md) for the full design.
 
 ## License
 
-Not yet decided. A `LICENSE` file (MIT or Apache-2.0) will be added before the first public release.
+MIT — see [`LICENSE`](LICENSE).
