@@ -111,15 +111,20 @@ ferroflow info --model models/mlp.onnx
 #   relu: 2
 ```
 
-### `ferroflow run` — execute an ONNX model and print RunMetrics
+### `ferroflow run` — execute a DAG and print RunMetrics
 
 ```bash
+# ONNX model
 ferroflow run --model models/mlp.onnx --workers 4
 ferroflow run --model models/mlp.onnx --workers 4 --scheduler static
-ferroflow run --model models/mlp.onnx --workers 1 --scheduler sequential
+
+# Synthetic DAGs (no model file needed)
+ferroflow run --dag imbalanced --workers 8 --scheduler work-stealing
+ferroflow run --dag large-wide --width 320 --depth 1 --skew 0.47 --workers 16
+ferroflow run --dag large-transformer --layers 8 --d-model 512 --workers 8
 ```
 
-Options: `--model PATH`, `--workers N`, `--scheduler sequential|static|work-stealing`.
+Options: `--model PATH | --dag <transformer|wide|resnet|large-transformer|large-wide|imbalanced>`, `--workers N`, `--scheduler sequential|static|work-stealing`, `--steal-threshold N`.
 
 ---
 
@@ -190,30 +195,47 @@ Full methodology and per-run notes are in [`docs/benchmarks.md`](docs/benchmarks
 ### Narval strong scaling (2–8 nodes)
 
 ![Throughput scaling](docs/plots/scaling_throughput.png)
+![WS advantage over static](docs/plots/ws_advantage.png)
 ![Parallel efficiency](docs/plots/scaling_efficiency.png)
 ![Steal rate](docs/plots/steal_rate.png)
 
-> On parallel skewed workloads (large-wide DAG, 321 ops), ferroflow's work-stealing scheduler achieves 95.9% parallel efficiency at 8 nodes with 809 steals/sec, outperforming static scheduling while maintaining near-linear throughput scaling. On serial dependency chains (transformer DAG), both schedulers are bounded by DAG topology rather than scheduling strategy, correctly identifying parallelism as the limiting factor.
+Three DAG topologies exercise different scheduler behaviours:
+
+- **Imbalanced** — the WS advantage story: provable load concentration under round-robin, WS steals from overloaded workers and beats static by up to **+12.7%** at 2 nodes.
+- **Large-Wide** — near-ideal linear scaling: both schedulers scale together at 95.9% efficiency; WS's steal rate grows to 808/s confirming active rebalancing at no cost to throughput.
+- **Transformer** — topology bottleneck: sequential attention layers cap throughput at ~555 ops/s regardless of node count or scheduler.
+
+#### Imbalanced DAG (205 ops — 4 heavy×200ms + 200 fast×1ms)
+
+Round-robin pre-assigns the 4 heavy ops to workers 0–3, which remain occupied while workers 4–N exhaust their fast queues in ~25ms and become idle. Work-stealing redistributes the fast ops that were pre-assigned to the busy workers, cutting wall time from ~236ms to ~206ms.
+
+| Nodes | Static (ops/s) | WS (ops/s) | WS vs Static | Steal Rate |
+|-------|---------------|-----------|-------------|-----------|
+| 2 | 900 | **1 014** | **+12.7%** | 477/s |
+| 4 | 959 | **1 013** | **+5.6%** | 219/s |
+| 8 | 988 | **1 013** | **+2.5%** | 99/s |
+
+WS beats static at every node count. The advantage narrows with more nodes because a larger worker pool means fewer fast ops are held hostage by each heavy-op worker — at 8 nodes (32 workers) each heavy-op worker holds ~6ms of stealable work vs ~25ms at 2 nodes. Steal rate falls as the relative imbalance shrinks, not because stealing stops working.
 
 #### Large-Wide DAG (321 ops, flat fan-out, skew=0.47)
 
 | Nodes | Static (ops/s) | WS (ops/s) | WS Efficiency | Steal Rate |
 |-------|---------------|-----------|--------------|-----------|
-| 2 | 2 702 | 2 700 | 1.000 | 42/s |
-| 4 | 5 221 | 5 311 | 0.984 | 183/s |
-| 8 | 10 351 | **10 362** | **0.959** | **809/s** |
+| 2 | 2 701 | 2 700 | 1.000 | 42/s |
+| 4 | 5 219 | **5 310** | **0.983** | 183/s |
+| 8 | 10 359 | **10 364** | **0.960** | **808/s** |
 
-WS matches or beats static at every node count. Throughput scales from 2 700 → 10 362 ops/s (3.84×) across 2 → 8 nodes, versus 4× ideal — 95.9% efficiency. Steal rate grows superlinearly (42 → 809/s) confirming active load rebalancing as the worker pool expands.
+Throughput scales from 2 700 → 10 364 ops/s (3.84×) across 2 → 8 nodes versus 4× ideal — 96% efficiency. WS matches or beats static at every node count. Steal rate grows superlinearly (42 → 808/s) as the worker pool expands and inter-worker imbalance accumulates. stddev ≤ 14 ops/s across 5 runs confirming stable results.
 
 #### Large-Transformer DAG (137 ops, 8 layers, d=512)
 
 | Nodes | Static (ops/s) | WS (ops/s) | WS Efficiency | Steal Rate |
 |-------|---------------|-----------|--------------|-----------|
-| 2 | 559 | 553 | 1.000 | 0/s |
-| 4 | 556 | 562 | 0.508 | 29/s |
-| 8 | 552 | 546 | 0.247 | 28/s |
+| 2 | 556 | 556 | 1.000 | 0/s |
+| 4 | 560 | 557 | 0.501 | 35/s |
+| 8 | 552 | 543 | 0.244 | 28/s |
 
-Throughput is flat (~550–562 ops/s) regardless of node count. The transformer's sequential layer backbone — each layer's attention output feeds the next — limits parallelism to the 3-way QKV fan-out per layer, which saturates quickly. Efficiency drops to 0.25 by 8 nodes for both schedulers, confirming DAG topology as the bottleneck rather than scheduling strategy.
+Throughput is flat (~545–560 ops/s) regardless of node count. Each transformer layer's attention output feeds the next, capping parallelism at the 3-way QKV fan-out per layer. Efficiency drops identically for both schedulers — confirming DAG topology as the bottleneck. The WS advantage plot shows transformer WS running slightly below static at 8 nodes from coordinator overhead with no stealable parallelism to compensate.
 
 ### Earlier Narval runs (small synthetic DAGs, MPI, job 59471496)
 
