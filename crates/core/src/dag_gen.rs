@@ -247,6 +247,51 @@ pub fn gen_large_wide(
     gen_wide_dag(width, depth, skew_factor)
 }
 
+/// Generates an imbalanced DAG that provably concentrates slow work on specific workers
+/// under static round-robin scheduling, exposing the work-stealing advantage.
+///
+/// Structure (1 + n_long_chains + n_short_ops ops):
+/// - Op 0: root fan-out source (no dependencies)
+/// - n_long_chains heavy ops each taking `chain_depth × slow_factor` ms, all independent
+///   (each depends only on root — no inter-op dependencies within the heavy group)
+/// - n_short_ops fast ops each taking 1 ms, also depending only on root
+///
+/// **Why this breaks static:** Round-robin assigns the first n_long_chains heavy ops to
+/// workers 0..n_long_chains-1 before any fast ops. Those workers become fully occupied
+/// for `chain_depth × slow_factor` ms. The remaining workers exhaust their fast-op queues
+/// in `(n_short_ops / n_workers)` ms and sit idle. Work-stealing detects the idle workers
+/// and redistributes the fast ops that were pre-assigned to the busy workers.
+///
+/// # Errors
+/// Returns [`DagError`] if DAG construction fails.
+pub fn gen_imbalanced(
+    n_long_chains: usize,
+    chain_depth: usize,
+    n_short_ops: usize,
+    slow_factor: u64,
+) -> Result<(Dag, HashMap<OpId, Tensor>), DagError> {
+    let slow_ms = chain_depth as u64 * slow_factor;
+    let total = 1 + n_long_chains + n_short_ops;
+    let mut ops: Vec<Op> = Vec::with_capacity(total);
+
+    ops.push(Op::new(0, OpKind::Relu { len: 1 }, vec![], vec![1]));
+
+    for b in 0..n_long_chains {
+        let id = 1 + b;
+        ops.push(Op::new(id, OpKind::Slow { duration_ms: slow_ms }, vec![0], vec![1]));
+    }
+
+    let short_base = 1 + n_long_chains;
+    for i in 0..n_short_ops {
+        let id = short_base + i;
+        ops.push(Op::new(id, OpKind::Slow { duration_ms: 1 }, vec![0], vec![1]));
+    }
+
+    let dag = Dag::new(ops)?;
+    let sources = HashMap::from([(0usize, Tensor::full(&[1], 1.0))]);
+    Ok((dag, sources))
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -435,5 +480,50 @@ mod tests {
             matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 5)
         }).count();
         assert_eq!(n_slow, 16 * 10, "half branches × 10 ops each");
+    }
+
+    #[test]
+    fn imbalanced_op_count() {
+        let (dag, sources) = gen_imbalanced(4, 20, 200, 10).unwrap();
+        assert_eq!(dag.len(), 1 + 4 + 200, "205 ops");
+        assert_eq!(sources.len(), 1);
+    }
+
+    #[test]
+    fn imbalanced_no_cycle() {
+        let (dag, _) = gen_imbalanced(4, 20, 200, 10).unwrap();
+        assert_no_cycle(&dag);
+    }
+
+    #[test]
+    fn imbalanced_heavy_ops_fan_out_from_root() {
+        let (dag, _) = gen_imbalanced(2, 3, 0, 5).unwrap();
+        // Heavy ops 1 and 2 both depend only on root
+        assert_eq!(dag.ops[1].input_ids, vec![0]);
+        assert_eq!(dag.ops[2].input_ids, vec![0]);
+    }
+
+    #[test]
+    fn imbalanced_short_ops_fan_out_from_root() {
+        let (dag, _) = gen_imbalanced(2, 3, 5, 5).unwrap();
+        // Short ops start at id = 1 + 2 = 3
+        for i in 3..8usize {
+            assert_eq!(dag.ops[i].input_ids, vec![0], "short op {i} must depend only on root");
+        }
+    }
+
+    #[test]
+    fn imbalanced_slow_fast_split() {
+        // n_long_chains=2, chain_depth=3, n_short_ops=4, slow_factor=10
+        // heavy op duration = 3 * 10 = 30ms; fast op duration = 1ms
+        let (dag, _) = gen_imbalanced(2, 3, 4, 10).unwrap();
+        let slow_count = dag.ops.iter().filter(|op| {
+            matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 30)
+        }).count();
+        let fast_count = dag.ops.iter().filter(|op| {
+            matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 1)
+        }).count();
+        assert_eq!(slow_count, 2, "2 heavy ops");
+        assert_eq!(fast_count, 4, "4 fast short ops");
     }
 }

@@ -52,21 +52,26 @@ extract_tp()    { grep -oP '[0-9]+(?= ops/s)' <<< "$1" | head -1; }
 extract_idle()  { grep -oP '(?<=idle=)[0-9.]+' <<< "$1" | head -1; }
 extract_steal() { grep -oP '(?<=steals=)[0-9.]+' <<< "$1" | head -1; }
 
-# Compute median of 3 whitespace-separated numbers via awk
-median3() { printf '%s\n' "$@" | sort -n | awk 'NR==2'; }
+# Compute median of 5 whitespace-separated numbers via awk
+median5() { printf '%s\n' "$@" | sort -n | awk 'NR==3'; }
 
 # ── append one entry to scaling_results.json via python3 ─────────────────────
 append_json() {
     local dag=$1 nodes=$2 sched=$3 tp=$4 idle=$5 steal=$6 eff=$7
+    shift 7
+    local tp_values=("$@")
     python3 - <<PYEOF
-import json, pathlib
+import json, pathlib, statistics
 p = pathlib.Path("${RESULTS}")
 data = json.loads(p.read_text()) if p.exists() else []
+raw = [float(x) for x in "${tp_values[*]}".split() if x]
+stddev = round(statistics.stdev(raw), 2) if len(raw) >= 2 else 0.0
 data.append({
     "dag":       "${dag}",
     "nodes":     ${nodes},
     "scheduler": "${sched}",
     "throughput": float("${tp:-0}"),
+    "stddev":     stddev,
     "idle_pct":   float("${idle:-0}"),
     "steal_rate": float("${steal:-0}"),
     "efficiency": float("${eff:-1.0}"),
@@ -77,7 +82,7 @@ PYEOF
 
 # ── run matrix ────────────────────────────────────────────────────────────────
 NODES_LIST=(2 4 8)
-DAGS=(large-transformer large-wide)
+DAGS=(large-transformer large-wide imbalanced)
 SCHEDS=(static work-stealing)
 
 # Associative array: "dag:sched" -> baseline throughput at N=2
@@ -90,6 +95,7 @@ for DAG in "${DAGS[@]}"; do
     case "${DAG}" in
         large-transformer) DAG_FLAGS="--dag large-transformer --layers 8 --d-model 512" ;;
         large-wide)        DAG_FLAGS="--dag large-wide --width 320 --depth 1 --skew 0.47" ;;
+        imbalanced)        DAG_FLAGS="--dag imbalanced --n-long-chains 4 --chain-depth 20 --n-short-ops 200 --slow-factor 10" ;;
     esac
 
     for SCHED in "${SCHEDS[@]}"; do
@@ -102,7 +108,7 @@ for DAG in "${DAGS[@]}"; do
 
             TPS=() IDLES=() STEALS=()
 
-            for RUN in 1 2 3; do
+            for RUN in 1 2 3 4 5; do
                 # Each srun step writes per-rank output; we read rank 0.
                 RANK0="${STEP_DIR}/${DAG}_${SCHED_SLUG}_n${N}_r${RUN}_rank0.out"
                 PATTERN="${STEP_DIR}/${DAG}_${SCHED_SLUG}_n${N}_r${RUN}_rank%t.out"
@@ -140,9 +146,9 @@ for DAG in "${DAGS[@]}"; do
                 TPS=(0); IDLES=(0); STEALS=(0)
             fi
 
-            MED_TP=$(median3    "${TPS[@]}")
-            MED_IDLE=$(median3  "${IDLES[@]}")
-            MED_STEAL=$(median3 "${STEALS[@]}")
+            MED_TP=$(median5    "${TPS[@]}")
+            MED_IDLE=$(median5  "${IDLES[@]}")
+            MED_STEAL=$(median5 "${STEALS[@]}")
 
             # Record baseline at N=2 for efficiency calculation
             KEY="${DAG}:${SCHED}"
@@ -159,7 +165,7 @@ for DAG in "${DAGS[@]}"; do
 
             echo "[scaling]   median: tp=${MED_TP}  idle=${MED_IDLE}%  steal=${MED_STEAL}/s  eff=${EFF}"
 
-            append_json "${DAG}" "${N}" "${SCHED}" "${MED_TP}" "${MED_IDLE}" "${MED_STEAL}" "${EFF}"
+            append_json "${DAG}" "${N}" "${SCHED}" "${MED_TP}" "${MED_IDLE}" "${MED_STEAL}" "${EFF}" "${TPS[@]}"
             RECORDS+=("${DAG}|${N}|${SCHED}|${MED_TP}|${MED_IDLE}|${MED_STEAL}|${EFF}")
         done
     done
@@ -172,6 +178,7 @@ print_table() {
     case "${TARGET_DAG}" in
         large-transformer) TITLE="Large Transformer DAG (137 ops, 8 layers, d=512)" ;;
         large-wide)        TITLE="Large Wide DAG (321 ops, width=320 depth=1 skew=0.47)" ;;
+        imbalanced)        TITLE="Imbalanced DAG (205 ops, 4 heavy ops × 200ms + 200 fast ops × 1ms)" ;;
         *)                 TITLE="${TARGET_DAG}" ;;
     esac
 
@@ -199,6 +206,7 @@ print_table() {
 
 print_table "large-transformer"
 print_table "large-wide"
+print_table "imbalanced"
 
 # ── analysis paragraph ────────────────────────────────────────────────────────
 # Find node count where WS efficiency first drops below 0.70
@@ -244,11 +252,12 @@ ANALYSIS_BLOCK=$(cat <<ANALYSIS
 - **Machine:** Narval (Alliance Canada)  |  **Job:** ${SLURM_JOB_ID}
 - **Nodes:** 2, 4, 8 |  **Ranks/node:** 1  |  **CPUs/rank:** ${SLURM_CPUS_PER_TASK}
 - **Workers:** N × ${SLURM_CPUS_PER_TASK} threads (32 per simulated node)
-- **DAGs:** large-transformer (137 ops, 8 layers d=512), large-wide (321 ops, width=320 depth=1 skew=0.47)
+- **DAGs:** large-transformer (137 ops, 8 layers d=512), large-wide (321 ops, width=320 depth=1 skew=0.47), imbalanced (205 ops, 4 heavy ops × 200ms + 200 fast ops × 1ms)
 - **Commit:** ${GIT_SHA}
 
 $(print_table "large-transformer")
 $(print_table "large-wide")
+$(print_table "imbalanced")
 
 **Analysis:** WS efficiency first drops below 0.70 at ${EFF_DROP} nodes, indicating that
 coordinator-mediated steal latency begins to dominate as the worker pool grows beyond that point.
