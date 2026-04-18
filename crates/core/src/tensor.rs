@@ -7,7 +7,11 @@ use thiserror::Error;
 pub enum TensorError {
     /// The flat data length does not match the product of `shape`.
     #[error("data length {got} does not match shape {shape:?} (expected {expected})")]
-    ShapeMismatch { shape: Vec<usize>, expected: usize, got: usize },
+    ShapeMismatch {
+        shape: Vec<usize>,
+        expected: usize,
+        got: usize,
+    },
 }
 
 /// A dense f32 tensor backed by an n-dimensional [`ndarray::ArrayD`].
@@ -23,27 +27,37 @@ impl Tensor {
     /// Returns [`TensorError::ShapeMismatch`] if `data.len() != shape.iter().product()`.
     pub fn from_shape_vec(shape: &[usize], data: Vec<f32>) -> Result<Self, TensorError> {
         let expected: usize = shape.iter().product();
-        if data.len() != expected {
+        let got = data.len();
+        if got != expected {
             return Err(TensorError::ShapeMismatch {
                 shape: shape.to_vec(),
                 expected,
-                got: data.len(),
+                got,
             });
         }
         Ok(Self {
-            data: Array::from_shape_vec(IxDyn(shape), data)
-                .expect("shape already validated above"),
+            data: Array::from_shape_vec(IxDyn(shape), data).map_err(|_| {
+                TensorError::ShapeMismatch {
+                    shape: shape.to_vec(),
+                    expected,
+                    got,
+                }
+            })?,
         })
     }
 
     /// Creates a zero-filled tensor of the given shape.
     pub fn zeros(shape: &[usize]) -> Self {
-        Self { data: ArrayD::zeros(IxDyn(shape)) }
+        Self {
+            data: ArrayD::zeros(IxDyn(shape)),
+        }
     }
 
     /// Creates a tensor filled with `value`.
     pub fn full(shape: &[usize], value: f32) -> Self {
-        Self { data: ArrayD::from_elem(IxDyn(shape), value) }
+        Self {
+            data: ArrayD::from_elem(IxDyn(shape), value),
+        }
     }
 
     /// Shape of the tensor (dimension sizes).

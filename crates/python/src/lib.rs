@@ -56,9 +56,7 @@ impl PyDag {
         let id = self.ops.len();
         let len: usize = shape.iter().product::<usize>().max(1);
 
-        let kind = if input_ids.is_empty() {
-            OpKind::Relu { len }
-        } else if use_relu {
+        let kind = if input_ids.is_empty() || use_relu {
             OpKind::Relu { len }
         } else {
             OpKind::Slow { duration_ms: 0 }
@@ -94,16 +92,13 @@ fn run(dag: PyRef<'_, PyDag>, workers: usize) -> PyResult<HashMap<u32, Vec<f32>>
         .map(|op| (op.id, Tensor::full(&op.output_shape, 1.0)))
         .collect();
 
-    let core_dag =
-        Dag::new(ops).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let core_dag = Dag::new(ops).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let rt = tokio::runtime::Runtime::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
     let (results, _metrics) = rt
         .block_on(
-            WorkStealingScheduler::new(workers.max(1))
-                .execute(Arc::new(core_dag), source_tensors),
+            WorkStealingScheduler::new(workers.max(1)).execute(Arc::new(core_dag), source_tensors),
         )
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 

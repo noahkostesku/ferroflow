@@ -141,7 +141,10 @@ impl Dag {
         n_ops: usize,
         slow_branch_factor: u64,
     ) -> Result<(Self, HashMap<OpId, Tensor>), DagError> {
-        assert!(n_ops >= 2 && n_ops % 2 == 0, "n_ops must be a positive even number");
+        assert!(
+            n_ops >= 2 && n_ops.is_multiple_of(2),
+            "n_ops must be a positive even number"
+        );
         let half = n_ops / 2;
         let mut ops: Vec<Op> = Vec::with_capacity(2 + n_ops);
 
@@ -149,20 +152,26 @@ impl Dag {
         ops.push(Op::new(1, OpKind::Relu { len: 1 }, vec![], vec![1]));
 
         for i in 0..half {
-            ops.push(Op::new(2 + i, OpKind::Slow { duration_ms: 1 }, vec![0], vec![1]));
+            ops.push(Op::new(
+                2 + i,
+                OpKind::Slow { duration_ms: 1 },
+                vec![0],
+                vec![1],
+            ));
         }
         for i in 0..half {
             ops.push(Op::new(
                 2 + half + i,
-                OpKind::Slow { duration_ms: slow_branch_factor },
+                OpKind::Slow {
+                    duration_ms: slow_branch_factor,
+                },
                 vec![1],
                 vec![1],
             ));
         }
 
         let dag = Self::new(ops)?;
-        let sources =
-            HashMap::from([(0, Tensor::full(&[1], 1.0)), (1, Tensor::full(&[1], 1.0))]);
+        let sources = HashMap::from([(0, Tensor::full(&[1], 1.0)), (1, Tensor::full(&[1], 1.0))]);
         Ok((dag, sources))
     }
 }
@@ -173,7 +182,12 @@ mod tests {
     use crate::op::{Op, OpKind};
 
     fn matmul_op(id: OpId, input_ids: Vec<OpId>) -> Op {
-        Op::new(id, OpKind::Matmul { m: 4, n: 4, k: 4 }, input_ids, vec![4, 4])
+        Op::new(
+            id,
+            OpKind::Matmul { m: 4, n: 4, k: 4 },
+            input_ids,
+            vec![4, 4],
+        )
     }
 
     /// Build a 5-op DAG:
@@ -243,11 +257,11 @@ mod tests {
     #[test]
     fn cycle_detected() {
         // 0 → 1 → 0
-        let result = Dag::new(vec![
-            matmul_op(0, vec![1]),
-            matmul_op(1, vec![0]),
-        ]);
-        assert!(matches!(result.unwrap().topological_sort(), Err(DagError::CycleDetected)));
+        let result = Dag::new(vec![matmul_op(0, vec![1]), matmul_op(1, vec![0])]);
+        assert!(matches!(
+            result.unwrap().topological_sort(),
+            Err(DagError::CycleDetected)
+        ));
     }
 
     #[test]

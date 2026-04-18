@@ -22,7 +22,9 @@ pub struct WorkQueue {
 impl WorkQueue {
     /// Creates an empty work queue.
     pub fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(VecDeque::new())) }
+        Self {
+            inner: Arc::new(Mutex::new(VecDeque::new())),
+        }
     }
 
     /// Pushes an operation ID to the back of the queue.
@@ -84,10 +86,7 @@ pub trait WorkerTrait {
     ///
     /// # Errors
     /// Returns an error if the operation fails or required inputs are unavailable.
-    fn execute_op(
-        &mut self,
-        op_id: OpId,
-    ) -> impl Future<Output = anyhow::Result<Tensor>> + Send;
+    fn execute_op(&mut self, op_id: OpId) -> impl Future<Output = anyhow::Result<Tensor>> + Send;
 
     /// Attempts to steal one operation from this worker's local queue.
     /// Returns `None` if the queue is empty.

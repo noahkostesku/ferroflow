@@ -2,7 +2,7 @@
 
 > Check this file at the start of every session to orient on current status.
 
-Last updated: 2026-04-17 (Week 6 Session 3)
+Last updated: 2026-04-18 (Week 6 Session 2)
 
 ---
 
@@ -19,7 +19,7 @@ _Target: 2026-04-20_
 - [x] Unit tests for DAG (7 tests: ordering, cycle detection, invalid IDs, ready-op progression)
 - [x] Single-node `SequentialExecutor` — walks topo order, executes ops, returns `HashMap<OpId, Tensor>`
 - [x] Baseline benchmark: 20-op matmul chain (128×128) → **~1.02 ms / iteration** (local dev machine)
-- [ ] CI setup (GitHub Actions or local `cargo test && cargo clippy`)
+- [x] CI setup (GitHub Actions or local `cargo test && cargo clippy`)
 
 ## Week 2 — MPI Setup, Static Scheduler, Work-Stealing Protocol
 _Target: 2026-04-27_
@@ -70,8 +70,8 @@ _Target: 2026-05-11_
 - [x] CLI extended: `ferroflow info/run --dag <transformer|wide|resnet>` alongside `--model`; wide supports `--width`, `--depth`, `--skew`; transformer supports `--seq-len`, `--d-model`, `--n-heads`; resnet supports `--channels`
 - [ ] DAG spec file format (JSON or TOML)
 - [x] README.md with project description, build instructions, benchmark summary
-- [ ] Clean up all `clippy` warnings
-- [ ] Ensure all public APIs have doc comments (`cargo doc --no-deps` clean)
+- [x] Clean up all `clippy` warnings
+- [x] Ensure all public APIs have doc comments (`cargo doc --no-deps` clean)
 - [ ] Final 256-node benchmark run on Narval
 - [ ] Update `docs/benchmarks.md` with final results
 - [ ] Tag v0.1.0 release
@@ -106,3 +106,4 @@ _Target: 2026-04-17_
 - **2026-04-17:** Week 5 Session 2. `slurm/scaling.sh` — strong scaling harness (2/4/8/16 nodes, transformer+wide-skew, static+WS, 3 runs/config, median). srun per-rank output to $SCRATCH. JSON append, comparison tables, analysis paragraph auto-generated. Ready to rsync and sbatch.
 - **2026-04-17:** Week 5 Session 1. Synthetic DAG generators in `crates/core/src/dag_gen.rs`. Local scaling preview (release build, 4 workers): transformer WS=2.5 ms vs static=2.6 ms vs seq=3.3 ms; resnet WS=0.1 ms (fork-join too small for steal benefit); wide+skew(8×5,0.25) WS=58.8 ms vs static=59.2 ms vs seq=97.2 ms (1.65× speedup over sequential). Steal rate is 0 locally — coordinator-mediated stealing is the key differentiator at Narval scale. 55/55 tests pass.
 - **2026-04-17:** Week 4 Session 1. PyO3 bindings in `crates/python` (new workspace member). `#[pyclass(name = "DAG")]` wraps a `Vec<Op>` builder; `matmul`/`relu`/`layer_norm`/`reduce` each append an `Op` and return its `u32` ID. `run(dag, workers)` constructs the `Dag`, pre-populates source tensors, and blocks a new `tokio::Runtime` on `WorkStealingScheduler::execute`. `pyproject.toml` uses maturin 1.x. `maturin develop` + `python ferroflow/examples/simple_mlp.py` verified — 33/33 tests pass.
+- **2026-04-18:** Week 6 Session 2. Code quality + CI pass. Fixed all clippy warnings (`manual_is_multiple_of`, `too_many_arguments` via `SyntheticDagParams` struct, `if_same_then_else` in python crate). Replaced all `.unwrap()`/`.expect()` in library code with proper `?` propagation; added `WorkerPanicked` and `Internal` variants to `SchedulerError` and `ExecutorError`. `cargo doc --no-deps` emits zero warnings. Created `.github/workflows/ci.yml` (test/clippy/fmt jobs, `release/*` + `main` triggers). CI badge already present in README. 63/63 tests pass locally.

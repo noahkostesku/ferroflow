@@ -50,7 +50,12 @@ pub struct Op {
 impl Op {
     /// Creates a new `Op`.
     pub fn new(id: OpId, kind: OpKind, input_ids: Vec<OpId>, output_shape: Vec<usize>) -> Self {
-        Self { id, kind, input_ids, output_shape }
+        Self {
+            id,
+            kind,
+            input_ids,
+            output_shape,
+        }
     }
 
     /// Delegates to [`OpKind::cost_estimate`].

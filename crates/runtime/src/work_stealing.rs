@@ -40,7 +40,10 @@ impl WorkStealingScheduler {
     /// and the default steal threshold of 2.
     pub fn new(n_workers: usize) -> Self {
         assert!(n_workers > 0, "n_workers must be at least 1");
-        Self { n_workers, steal_threshold: DEFAULT_STEAL_THRESHOLD }
+        Self {
+            n_workers,
+            steal_threshold: DEFAULT_STEAL_THRESHOLD,
+        }
     }
 
     /// Sets the steal threshold (minimum victim queue depth before stealing is
@@ -85,8 +88,7 @@ impl WorkStealingScheduler {
     ) -> Result<(HashMap<OpId, Tensor>, SchedulerMetrics), WorkStealingError> {
         let n = self.n_workers;
         let steal_threshold = self.steal_threshold;
-        let total_ops =
-            dag.ops.iter().filter(|op| !op.input_ids.is_empty()).count() as u64;
+        let total_ops = dag.ops.iter().filter(|op| !op.input_ids.is_empty()).count() as u64;
 
         // Per-worker queues with round-robin initial assignment.
         let queues: Arc<Vec<WorkQueue>> = Arc::new((0..n).map(|_| WorkQueue::new()).collect());
@@ -96,8 +98,7 @@ impl WorkStealingScheduler {
             }
         }
 
-        let store: Arc<Mutex<HashMap<OpId, Tensor>>> =
-            Arc::new(Mutex::new(source_tensors));
+        let store: Arc<Mutex<HashMap<OpId, Tensor>>> = Arc::new(Mutex::new(source_tensors));
 
         let (version_tx, version_rx) = watch::channel(0usize);
         let version_tx = Arc::new(version_tx);
@@ -107,8 +108,7 @@ impl WorkStealingScheduler {
         let successful_steals = Arc::new(AtomicU64::new(0));
 
         // Per-worker tracking for the live-metrics ticker.
-        let worker_ops: Arc<Vec<AtomicU64>> =
-            Arc::new((0..n).map(|_| AtomicU64::new(0)).collect());
+        let worker_ops: Arc<Vec<AtomicU64>> = Arc::new((0..n).map(|_| AtomicU64::new(0)).collect());
         let worker_status: Arc<Vec<AtomicU8>> =
             Arc::new((0..n).map(|_| AtomicU8::new(STATUS_IDLE)).collect());
         let worker_idle_us: Arc<Vec<AtomicU64>> =
@@ -230,8 +230,7 @@ impl WorkStealingScheduler {
                                     id
                                 }
                                 None => {
-                                    worker_status[worker_id]
-                                        .store(STATUS_IDLE, Ordering::Relaxed);
+                                    worker_status[worker_id].store(STATUS_IDLE, Ordering::Relaxed);
                                     let backoff_ms =
                                         10 + ((worker_id * 13 + attempt * 7) % 41) as u64;
                                     attempt += 1;
@@ -260,7 +259,9 @@ impl WorkStealingScheduler {
                         version_rx.borrow_and_update();
                         let ready = {
                             let s = store.lock().await;
-                            let op = dag.get_op(op_id).expect("valid op id");
+                            let op = dag
+                                .get_op(op_id)
+                                .ok_or(SchedulerError::Internal("valid op id"))?;
                             op.input_ids.iter().all(|dep| s.contains_key(dep))
                         };
                         if ready {
@@ -268,13 +269,13 @@ impl WorkStealingScheduler {
                         }
                         let tw = Instant::now();
                         version_rx.changed().await.ok();
-                        worker_idle_us[worker_id].fetch_add(
-                            tw.elapsed().as_micros() as u64,
-                            Ordering::Relaxed,
-                        );
+                        worker_idle_us[worker_id]
+                            .fetch_add(tw.elapsed().as_micros() as u64, Ordering::Relaxed);
                     }
 
-                    let op = dag.get_op(op_id).expect("valid op id");
+                    let op = dag
+                        .get_op(op_id)
+                        .ok_or(SchedulerError::Internal("valid op id"))?;
                     let inputs: Vec<Tensor> = {
                         let s = store.lock().await;
                         op.input_ids.iter().map(|dep| s[dep].clone()).collect()
@@ -294,7 +295,9 @@ impl WorkStealingScheduler {
         }
 
         for handle in handles {
-            handle.await.expect("worker task panicked")?;
+            handle
+                .await
+                .map_err(|e| SchedulerError::WorkerPanicked(e.to_string()))??;
         }
 
         // Send one final snapshot so the TUI sees the completed state regardless
@@ -304,16 +307,17 @@ impl WorkStealingScheduler {
         ticker.abort();
 
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let total_idle_micros: u64 =
-            worker_idle_us.iter().map(|a| a.load(Ordering::Relaxed)).sum();
+        let total_idle_micros: u64 = worker_idle_us
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .sum();
         let idle_time_ms = total_idle_micros as f64 / 1000.0;
         let sa = steal_attempts.load(Ordering::Relaxed);
         let ss = successful_steals.load(Ordering::Relaxed);
-        let metrics =
-            SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, sa, ss);
+        let metrics = SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, sa, ss);
 
         let store = Arc::try_unwrap(store)
-            .expect("all worker handles dropped")
+            .map_err(|_| SchedulerError::Internal("all worker handles dropped"))?
             .into_inner();
         Ok((store, metrics))
     }
@@ -336,7 +340,10 @@ mod tests {
         let sched = WorkStealingScheduler::new(2);
 
         let mut sources = HashMap::new();
-        sources.insert(0usize, Tensor::from_shape_vec(&[4], vec![-3., -1., 0., 2.]).unwrap());
+        sources.insert(
+            0usize,
+            Tensor::from_shape_vec(&[4], vec![-3., -1., 0., 2.]).unwrap(),
+        );
 
         let (results, metrics) = sched.execute(dag, sources).await.unwrap();
         let out: Vec<f32> = results[&3].data.iter().copied().collect();
@@ -370,14 +377,25 @@ mod tests {
         let ops = vec![
             Op::new(0, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![], vec![2, 2]),
             Op::new(1, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![], vec![2, 2]),
-            Op::new(2, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![0, 1], vec![2, 2]),
+            Op::new(
+                2,
+                OpKind::Matmul { m: 2, n: 2, k: 2 },
+                vec![0, 1],
+                vec![2, 2],
+            ),
         ];
         let dag = Arc::new(Dag::new(ops).unwrap());
         let sched = WorkStealingScheduler::new(2);
 
         let mut sources = HashMap::new();
-        sources.insert(0usize, Tensor::from_shape_vec(&[2, 2], vec![1., 0., 0., 1.]).unwrap());
-        sources.insert(1usize, Tensor::from_shape_vec(&[2, 2], vec![1., 2., 3., 4.]).unwrap());
+        sources.insert(
+            0usize,
+            Tensor::from_shape_vec(&[2, 2], vec![1., 0., 0., 1.]).unwrap(),
+        );
+        sources.insert(
+            1usize,
+            Tensor::from_shape_vec(&[2, 2], vec![1., 2., 3., 4.]).unwrap(),
+        );
 
         let (results, _) = sched.execute(dag, sources).await.unwrap();
         let flat: Vec<f32> = results[&2].data.iter().copied().collect();

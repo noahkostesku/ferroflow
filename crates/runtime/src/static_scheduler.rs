@@ -19,6 +19,12 @@ pub enum SchedulerError {
         #[source]
         source: OpError,
     },
+    /// A worker tokio task panicked.
+    #[error("worker task panicked: {0}")]
+    WorkerPanicked(String),
+    /// Internal invariant violated; indicates a bug in the scheduler.
+    #[error("internal error: {0}")]
+    Internal(&'static str),
 }
 
 /// Static round-robin scheduler.
@@ -45,7 +51,10 @@ impl StaticScheduler {
                 assignments[op.id % n_workers].push(op.id);
             }
         }
-        Self { n_workers, assignments }
+        Self {
+            n_workers,
+            assignments,
+        }
     }
 
     /// Executes `dag` with `n_workers` concurrent tokio tasks.
@@ -63,11 +72,9 @@ impl StaticScheduler {
         dag: Arc<Dag>,
         source_tensors: HashMap<OpId, Tensor>,
     ) -> Result<(HashMap<OpId, Tensor>, SchedulerMetrics), SchedulerError> {
-        let total_ops =
-            dag.ops.iter().filter(|op| !op.input_ids.is_empty()).count() as u64;
+        let total_ops = dag.ops.iter().filter(|op| !op.input_ids.is_empty()).count() as u64;
 
-        let store: Arc<Mutex<HashMap<OpId, Tensor>>> =
-            Arc::new(Mutex::new(source_tensors));
+        let store: Arc<Mutex<HashMap<OpId, Tensor>>> = Arc::new(Mutex::new(source_tensors));
 
         // Shared completion counter — workers bump this when they finish an op.
         // Waiting workers subscribe to `version_rx` and re-check deps on each tick.
@@ -95,7 +102,9 @@ impl StaticScheduler {
                         version_rx.borrow_and_update();
                         let ready = {
                             let s = store.lock().await;
-                            let op = dag.get_op(op_id).expect("valid op id");
+                            let op = dag
+                                .get_op(op_id)
+                                .ok_or(SchedulerError::Internal("valid op id"))?;
                             op.input_ids.iter().all(|dep| s.contains_key(dep))
                         };
                         if ready {
@@ -106,7 +115,9 @@ impl StaticScheduler {
                         idle_micros += tw.elapsed().as_micros() as u64;
                     }
 
-                    let op = dag.get_op(op_id).expect("valid op id");
+                    let op = dag
+                        .get_op(op_id)
+                        .ok_or(SchedulerError::Internal("valid op id"))?;
                     let inputs: Vec<Tensor> = {
                         let s = store.lock().await;
                         op.input_ids.iter().map(|dep| s[dep].clone()).collect()
@@ -127,16 +138,17 @@ impl StaticScheduler {
 
         let mut total_idle_micros: u64 = 0;
         for handle in handles {
-            total_idle_micros += handle.await.expect("worker task panicked")?;
+            total_idle_micros += handle
+                .await
+                .map_err(|e| SchedulerError::WorkerPanicked(e.to_string()))??;
         }
 
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let idle_time_ms = total_idle_micros as f64 / 1000.0;
-        let metrics =
-            SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, 0, 0);
+        let metrics = SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, 0, 0);
 
         let store = Arc::try_unwrap(store)
-            .expect("all worker handles dropped")
+            .map_err(|_| SchedulerError::Internal("all worker handles dropped"))?
             .into_inner();
         Ok((store, metrics))
     }
@@ -159,7 +171,10 @@ mod tests {
         let sched = StaticScheduler::new(&dag, 2);
 
         let mut sources = HashMap::new();
-        sources.insert(0usize, Tensor::from_shape_vec(&[4], vec![-3., -1., 0., 2.]).unwrap());
+        sources.insert(
+            0usize,
+            Tensor::from_shape_vec(&[4], vec![-3., -1., 0., 2.]).unwrap(),
+        );
 
         let (results, metrics) = sched.execute(dag, sources).await.unwrap();
         let out: Vec<f32> = results[&3].data.iter().copied().collect();
@@ -201,14 +216,25 @@ mod tests {
         let ops = vec![
             Op::new(0, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![], vec![2, 2]),
             Op::new(1, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![], vec![2, 2]),
-            Op::new(2, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![0, 1], vec![2, 2]),
+            Op::new(
+                2,
+                OpKind::Matmul { m: 2, n: 2, k: 2 },
+                vec![0, 1],
+                vec![2, 2],
+            ),
         ];
         let dag = Arc::new(Dag::new(ops).unwrap());
         let sched = StaticScheduler::new(&dag, 2);
 
         let mut sources = HashMap::new();
-        sources.insert(0usize, Tensor::from_shape_vec(&[2, 2], vec![1., 0., 0., 1.]).unwrap());
-        sources.insert(1usize, Tensor::from_shape_vec(&[2, 2], vec![1., 2., 3., 4.]).unwrap());
+        sources.insert(
+            0usize,
+            Tensor::from_shape_vec(&[2, 2], vec![1., 0., 0., 1.]).unwrap(),
+        );
+        sources.insert(
+            1usize,
+            Tensor::from_shape_vec(&[2, 2], vec![1., 2., 3., 4.]).unwrap(),
+        );
 
         let (results, _) = sched.execute(dag, sources).await.unwrap();
         let flat: Vec<f32> = results[&2].data.iter().copied().collect();

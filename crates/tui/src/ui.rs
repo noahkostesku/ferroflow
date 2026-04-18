@@ -36,7 +36,9 @@ pub fn draw(frame: &mut Frame<'_>, state: &DashboardState) {
 }
 
 fn draw_workers(frame: &mut Frame<'_>, state: &DashboardState, area: Rect) {
-    let block = Block::default().title(" Worker Status ").borders(Borders::ALL);
+    let block = Block::default()
+        .title(" Worker Status ")
+        .borders(Borders::ALL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -105,16 +107,15 @@ fn draw_workers(frame: &mut Frame<'_>, state: &DashboardState, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             )
             .ratio(state.progress())
-            .label(format!(
-                "{}/{} ops",
-                state.completed_ops, state.total_ops
-            ));
+            .label(format!("{}/{} ops", state.completed_ops, state.total_ops));
         frame.render_widget(gauge, chunks[prog_idx]);
     }
 }
 
 fn draw_throughput(frame: &mut Frame<'_>, state: &DashboardState, area: Rect) {
-    let block = Block::default().title(" Throughput (ops/s) ").borders(Borders::ALL);
+    let block = Block::default()
+        .title(" Throughput (ops/s) ")
+        .borders(Borders::ALL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -168,10 +169,7 @@ fn draw_steal_activity(frame: &mut Frame<'_>, state: &DashboardState, area: Rect
         ]),
         Line::from(vec![
             Span::styled("rate     : ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{rate:.1}/s"),
-                Style::default().fg(Color::Yellow),
-            ),
+            Span::styled(format!("{rate:.1}/s"), Style::default().fg(Color::Yellow)),
         ]),
         Line::from(vec![
             Span::styled("hit%     : ", Style::default().fg(Color::Gray)),
@@ -182,8 +180,11 @@ fn draw_steal_activity(frame: &mut Frame<'_>, state: &DashboardState, area: Rect
         ]),
     ];
 
-    let para = Paragraph::new(lines)
-        .block(Block::default().title(" Steal Activity ").borders(Borders::ALL));
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .title(" Steal Activity ")
+            .borders(Borders::ALL),
+    );
     frame.render_widget(para, area);
 }
 
@@ -222,7 +223,7 @@ fn draw_summary(frame: &mut Frame<'_>, state: &DashboardState, area: Rect) {
         ]),
     ];
 
-    let para = Paragraph::new(lines)
-        .block(Block::default().title(" Summary ").borders(Borders::ALL));
+    let para =
+        Paragraph::new(lines).block(Block::default().title(" Summary ").borders(Borders::ALL));
     frame.render_widget(para, area);
 }

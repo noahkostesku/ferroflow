@@ -34,31 +34,93 @@ pub fn gen_transformer_block(
     }
 
     // QKV projections — 3-way parallel fan-out from X
-    ops.push(Op::new(6, OpKind::Matmul { m: sl, n: m, k: m }, vec![0, 1], vec![m, m])); // Q
-    ops.push(Op::new(7, OpKind::Matmul { m: sl, n: m, k: m }, vec![0, 2], vec![m, m])); // K
-    ops.push(Op::new(8, OpKind::Matmul { m: sl, n: m, k: m }, vec![0, 3], vec![m, m])); // V
+    ops.push(Op::new(
+        6,
+        OpKind::Matmul { m: sl, n: m, k: m },
+        vec![0, 1],
+        vec![m, m],
+    )); // Q
+    ops.push(Op::new(
+        7,
+        OpKind::Matmul { m: sl, n: m, k: m },
+        vec![0, 2],
+        vec![m, m],
+    )); // K
+    ops.push(Op::new(
+        8,
+        OpKind::Matmul { m: sl, n: m, k: m },
+        vec![0, 3],
+        vec![m, m],
+    )); // V
 
     // Attention scores: Q · K
-    ops.push(Op::new(9, OpKind::Matmul { m: sl, n: sl, k: m }, vec![6, 7], vec![m, m]));
+    ops.push(Op::new(
+        9,
+        OpKind::Matmul { m: sl, n: sl, k: m },
+        vec![6, 7],
+        vec![m, m],
+    ));
     // Scale (approx): Relu(scores)
-    ops.push(Op::new(10, OpKind::Relu { len: m * m }, vec![9], vec![m, m]));
+    ops.push(Op::new(
+        10,
+        OpKind::Relu { len: m * m },
+        vec![9],
+        vec![m, m],
+    ));
     // Softmax (approx): LayerNorm(scaled_scores)
-    ops.push(Op::new(11, OpKind::LayerNorm { len: m * m }, vec![10], vec![m, m]));
+    ops.push(Op::new(
+        11,
+        OpKind::LayerNorm { len: m * m },
+        vec![10],
+        vec![m, m],
+    ));
     // Context: attn_weights · V
-    ops.push(Op::new(12, OpKind::Matmul { m: sl, n: m, k: m }, vec![11, 8], vec![m, m]));
+    ops.push(Op::new(
+        12,
+        OpKind::Matmul { m: sl, n: m, k: m },
+        vec![11, 8],
+        vec![m, m],
+    ));
     // Output projection: context · W_O
-    ops.push(Op::new(13, OpKind::Matmul { m: sl, n: m, k: m }, vec![12, 4], vec![m, m]));
+    ops.push(Op::new(
+        13,
+        OpKind::Matmul { m: sl, n: m, k: m },
+        vec![12, 4],
+        vec![m, m],
+    ));
     // Residual add (approx): Relu(out_proj)
-    ops.push(Op::new(14, OpKind::Relu { len: m * m }, vec![13], vec![m, m]));
+    ops.push(Op::new(
+        14,
+        OpKind::Relu { len: m * m },
+        vec![13],
+        vec![m, m],
+    ));
     // Layer norm 1
-    ops.push(Op::new(15, OpKind::LayerNorm { len: m * m }, vec![14], vec![m, m]));
+    ops.push(Op::new(
+        15,
+        OpKind::LayerNorm { len: m * m },
+        vec![14],
+        vec![m, m],
+    ));
     // Feed-forward: ln1 · W_FF
-    ops.push(Op::new(16, OpKind::Matmul { m: sl, n: m, k: m }, vec![15, 5], vec![m, m]));
+    ops.push(Op::new(
+        16,
+        OpKind::Matmul { m: sl, n: m, k: m },
+        vec![15, 5],
+        vec![m, m],
+    ));
     // Layer norm 2
-    ops.push(Op::new(17, OpKind::LayerNorm { len: m * m }, vec![16], vec![m, m]));
+    ops.push(Op::new(
+        17,
+        OpKind::LayerNorm { len: m * m },
+        vec![16],
+        vec![m, m],
+    ));
 
     let dag = Dag::new(ops)?;
-    let sources = (0..6usize).map(|id| (id, Tensor::full(&[m, m], val))).collect();
+    let sources = (0..6usize)
+        .map(|id| (id, Tensor::full(&[m, m], val)))
+        .collect();
     Ok((dag, sources))
 }
 
@@ -90,7 +152,12 @@ pub fn gen_wide_dag(
             let id = 1 + b * depth + d;
             let input_ids = if d == 0 { vec![0] } else { vec![id - 1] };
             let duration_ms: u64 = if slow { 5 } else { 1 };
-            ops.push(Op::new(id, OpKind::Slow { duration_ms }, input_ids, vec![1]));
+            ops.push(Op::new(
+                id,
+                OpKind::Slow { duration_ms },
+                input_ids,
+                vec![1],
+            ));
         }
     }
 
@@ -110,9 +177,7 @@ pub fn gen_wide_dag(
 ///
 /// # Errors
 /// Returns [`DagError`] if DAG construction fails.
-pub fn gen_resnet_block(
-    channels: usize,
-) -> Result<(Dag, HashMap<OpId, Tensor>), DagError> {
+pub fn gen_resnet_block(channels: usize) -> Result<(Dag, HashMap<OpId, Tensor>), DagError> {
     let val = 1.0 / channels as f32;
     let c = channels;
     let mut ops: Vec<Op> = Vec::with_capacity(8);
@@ -123,18 +188,40 @@ pub fn gen_resnet_block(
     }
 
     // conv1 = X · W1
-    ops.push(Op::new(3, OpKind::Matmul { m: c, n: c, k: c }, vec![0, 1], vec![c, c]));
+    ops.push(Op::new(
+        3,
+        OpKind::Matmul { m: c, n: c, k: c },
+        vec![0, 1],
+        vec![c, c],
+    ));
     // relu1 = Relu(conv1)
     ops.push(Op::new(4, OpKind::Relu { len: c * c }, vec![3], vec![c, c]));
     // conv2 = relu1 · W2
-    ops.push(Op::new(5, OpKind::Matmul { m: c, n: c, k: c }, vec![4, 2], vec![c, c]));
+    ops.push(Op::new(
+        5,
+        OpKind::Matmul { m: c, n: c, k: c },
+        vec![4, 2],
+        vec![c, c],
+    ));
     // merge = conv2 · X  (fork-join: depends on both conv path and skip/X)
-    ops.push(Op::new(6, OpKind::Matmul { m: c, n: c, k: c }, vec![5, 0], vec![c, c]));
+    ops.push(Op::new(
+        6,
+        OpKind::Matmul { m: c, n: c, k: c },
+        vec![5, 0],
+        vec![c, c],
+    ));
     // bn = LayerNorm(merge)
-    ops.push(Op::new(7, OpKind::LayerNorm { len: c * c }, vec![6], vec![c, c]));
+    ops.push(Op::new(
+        7,
+        OpKind::LayerNorm { len: c * c },
+        vec![6],
+        vec![c, c],
+    ));
 
     let dag = Dag::new(ops)?;
-    let sources = (0..3usize).map(|id| (id, Tensor::full(&[c, c], val))).collect();
+    let sources = (0..3usize)
+        .map(|id| (id, Tensor::full(&[c, c], val)))
+        .collect();
     Ok((dag, sources))
 }
 
@@ -210,24 +297,84 @@ fn build_transformer_compute(
 
     let cb = compute_base;
     // Q, K, V projections (3-way parallel fan-out from X)
-    ops.push(Op::new(cb,     OpKind::Matmul { m: sl, n: m, k: m }, vec![x_id, wq], vec![m, m]));
-    ops.push(Op::new(cb + 1, OpKind::Matmul { m: sl, n: m, k: m }, vec![x_id, wk], vec![m, m]));
-    ops.push(Op::new(cb + 2, OpKind::Matmul { m: sl, n: m, k: m }, vec![x_id, wv], vec![m, m]));
+    ops.push(Op::new(
+        cb,
+        OpKind::Matmul { m: sl, n: m, k: m },
+        vec![x_id, wq],
+        vec![m, m],
+    ));
+    ops.push(Op::new(
+        cb + 1,
+        OpKind::Matmul { m: sl, n: m, k: m },
+        vec![x_id, wk],
+        vec![m, m],
+    ));
+    ops.push(Op::new(
+        cb + 2,
+        OpKind::Matmul { m: sl, n: m, k: m },
+        vec![x_id, wv],
+        vec![m, m],
+    ));
     // Attention scores: Q · K
-    ops.push(Op::new(cb + 3, OpKind::Matmul { m: sl, n: sl, k: m }, vec![cb, cb + 1], vec![m, m]));
+    ops.push(Op::new(
+        cb + 3,
+        OpKind::Matmul { m: sl, n: sl, k: m },
+        vec![cb, cb + 1],
+        vec![m, m],
+    ));
     // Scale (Relu) + softmax approx (LayerNorm)
-    ops.push(Op::new(cb + 4, OpKind::Relu { len: m * m },            vec![cb + 3], vec![m, m]));
-    ops.push(Op::new(cb + 5, OpKind::LayerNorm { len: m * m },       vec![cb + 4], vec![m, m]));
+    ops.push(Op::new(
+        cb + 4,
+        OpKind::Relu { len: m * m },
+        vec![cb + 3],
+        vec![m, m],
+    ));
+    ops.push(Op::new(
+        cb + 5,
+        OpKind::LayerNorm { len: m * m },
+        vec![cb + 4],
+        vec![m, m],
+    ));
     // Context: attn_weights · V
-    ops.push(Op::new(cb + 6, OpKind::Matmul { m: sl, n: m, k: m }, vec![cb + 5, cb + 2], vec![m, m]));
+    ops.push(Op::new(
+        cb + 6,
+        OpKind::Matmul { m: sl, n: m, k: m },
+        vec![cb + 5, cb + 2],
+        vec![m, m],
+    ));
     // Output projection
-    ops.push(Op::new(cb + 7, OpKind::Matmul { m: sl, n: m, k: m }, vec![cb + 6, wo], vec![m, m]));
+    ops.push(Op::new(
+        cb + 7,
+        OpKind::Matmul { m: sl, n: m, k: m },
+        vec![cb + 6, wo],
+        vec![m, m],
+    ));
     // Residual + layer norm 1
-    ops.push(Op::new(cb + 8, OpKind::Relu { len: m * m },      vec![cb + 7], vec![m, m]));
-    ops.push(Op::new(cb + 9, OpKind::LayerNorm { len: m * m }, vec![cb + 8], vec![m, m]));
+    ops.push(Op::new(
+        cb + 8,
+        OpKind::Relu { len: m * m },
+        vec![cb + 7],
+        vec![m, m],
+    ));
+    ops.push(Op::new(
+        cb + 9,
+        OpKind::LayerNorm { len: m * m },
+        vec![cb + 8],
+        vec![m, m],
+    ));
     // Feed-forward + layer norm 2
-    ops.push(Op::new(cb + 10, OpKind::Matmul { m: sl, n: m, k: m }, vec![cb + 9, wff], vec![m, m]));
-    ops.push(Op::new(cb + 11, OpKind::LayerNorm { len: m * m },      vec![cb + 10], vec![m, m]));
+    ops.push(Op::new(
+        cb + 10,
+        OpKind::Matmul { m: sl, n: m, k: m },
+        vec![cb + 9, wff],
+        vec![m, m],
+    ));
+    ops.push(Op::new(
+        cb + 11,
+        OpKind::LayerNorm { len: m * m },
+        vec![cb + 10],
+        vec![m, m],
+    ));
     cb + 11
 }
 
@@ -278,13 +425,25 @@ pub fn gen_imbalanced(
 
     for b in 0..n_long_chains {
         let id = 1 + b;
-        ops.push(Op::new(id, OpKind::Slow { duration_ms: slow_ms }, vec![0], vec![1]));
+        ops.push(Op::new(
+            id,
+            OpKind::Slow {
+                duration_ms: slow_ms,
+            },
+            vec![0],
+            vec![1],
+        ));
     }
 
     let short_base = 1 + n_long_chains;
     for i in 0..n_short_ops {
         let id = short_base + i;
-        ops.push(Op::new(id, OpKind::Slow { duration_ms: 1 }, vec![0], vec![1]));
+        ops.push(Op::new(
+            id,
+            OpKind::Slow { duration_ms: 1 },
+            vec![0],
+            vec![1],
+        ));
     }
 
     let dag = Dag::new(ops)?;
@@ -366,9 +525,11 @@ mod tests {
         let width = 8;
         let skew = 0.25;
         let (dag, _) = gen_wide_dag(width, 5, skew).unwrap();
-        let n_slow = dag.ops.iter().filter(|op| {
-            matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 5)
-        }).count();
+        let n_slow = dag
+            .ops
+            .iter()
+            .filter(|op| matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 5))
+            .count();
         let expected_slow_branches = (width as f32 * skew).round() as usize;
         assert_eq!(n_slow, expected_slow_branches * 5);
     }
@@ -476,9 +637,11 @@ mod tests {
     #[test]
     fn large_wide_skew_branch_count() {
         let (dag, _) = gen_large_wide(32, 10, 0.5).unwrap();
-        let n_slow = dag.ops.iter().filter(|op| {
-            matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 5)
-        }).count();
+        let n_slow = dag
+            .ops
+            .iter()
+            .filter(|op| matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 5))
+            .count();
         assert_eq!(n_slow, 16 * 10, "half branches × 10 ops each");
     }
 
@@ -508,7 +671,11 @@ mod tests {
         let (dag, _) = gen_imbalanced(2, 3, 5, 5).unwrap();
         // Short ops start at id = 1 + 2 = 3
         for i in 3..8usize {
-            assert_eq!(dag.ops[i].input_ids, vec![0], "short op {i} must depend only on root");
+            assert_eq!(
+                dag.ops[i].input_ids,
+                vec![0],
+                "short op {i} must depend only on root"
+            );
         }
     }
 
@@ -517,12 +684,16 @@ mod tests {
         // n_long_chains=2, chain_depth=3, n_short_ops=4, slow_factor=10
         // heavy op duration = 3 * 10 = 30ms; fast op duration = 1ms
         let (dag, _) = gen_imbalanced(2, 3, 4, 10).unwrap();
-        let slow_count = dag.ops.iter().filter(|op| {
-            matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 30)
-        }).count();
-        let fast_count = dag.ops.iter().filter(|op| {
-            matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 1)
-        }).count();
+        let slow_count = dag
+            .ops
+            .iter()
+            .filter(|op| matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 30))
+            .count();
+        let fast_count = dag
+            .ops
+            .iter()
+            .filter(|op| matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 1))
+            .count();
         assert_eq!(slow_count, 2, "2 heavy ops");
         assert_eq!(fast_count, 4, "4 fast short ops");
     }

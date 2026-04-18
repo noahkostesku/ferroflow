@@ -30,7 +30,11 @@ enum MpiMsg {
     /// Worker requests the next available op.
     StealRequest { rank: i32 },
     /// Coordinator grants an op along with its pre-fetched input tensors.
-    StealGrant { op_id: OpId, op: Op, inputs: Vec<Tensor> },
+    StealGrant {
+        op_id: OpId,
+        op: Op,
+        inputs: Vec<Tensor>,
+    },
     /// No ready ops are available; worker should back off and retry.
     StealNone,
     /// Worker reports a completed op and its output tensor.
@@ -38,7 +42,11 @@ enum MpiMsg {
     /// Coordinator instructs the worker to exit cleanly.
     Shutdown,
     /// Worker sends its local counters after receiving Shutdown.
-    Metrics { idle_time_ms: f64, steal_attempts: u64, successful_steals: u64 },
+    Metrics {
+        idle_time_ms: f64,
+        steal_attempts: u64,
+        successful_steals: u64,
+    },
 }
 
 // ── public API ─────────────────────────────────────────────────────────────────
@@ -60,7 +68,11 @@ pub struct MpiWorker {
 impl MpiWorker {
     /// Creates a new `MpiWorker` with work-stealing dispatch (default).
     pub fn new(dag: Arc<Dag>, source_tensors: HashMap<OpId, Tensor>) -> Self {
-        Self { dag, source_tensors, mode: MpiSchedulerMode::WorkStealing }
+        Self {
+            dag,
+            source_tensors,
+            mode: MpiSchedulerMode::WorkStealing,
+        }
     }
 
     /// Overrides the dispatch strategy.
@@ -78,9 +90,7 @@ impl MpiWorker {
     /// # Errors
     /// Returns an error if MPI initialisation fails, there are fewer than 2
     /// ranks, or any op execution fails on a worker.
-    pub fn run(
-        self,
-    ) -> anyhow::Result<Option<(HashMap<OpId, Tensor>, SchedulerMetrics)>> {
+    pub fn run(self) -> anyhow::Result<Option<(HashMap<OpId, Tensor>, SchedulerMetrics)>> {
         let universe = mpi::initialize().context("MPI initialisation failed")?;
         let world = universe.world();
         let rank = world.rank();
@@ -181,8 +191,12 @@ fn coordinator_loop<C: Communicator>(
                     Some(op_id) => {
                         dispatched.insert(op_id);
                         in_flight += 1;
-                        let op =
-                            dag.get_op(op_id).expect("op_id from ready_ops is valid").clone();
+                        let op = dag
+                            .get_op(op_id)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("op_id {} from ready_ops is not in DAG", op_id)
+                            })?
+                            .clone();
                         let inputs = op
                             .input_ids
                             .iter()
@@ -224,7 +238,11 @@ fn coordinator_loop<C: Communicator>(
         if matches!(msg, MpiMsg::StealRequest { .. }) {
             mpi_send(world, source_rank, &MpiMsg::Shutdown)?;
             match mpi_recv_from(world, source_rank)? {
-                MpiMsg::Metrics { idle_time_ms, steal_attempts, successful_steals } => {
+                MpiMsg::Metrics {
+                    idle_time_ms,
+                    steal_attempts,
+                    successful_steals,
+                } => {
                     agg_idle_ms += idle_time_ms;
                     agg_steal_attempts += steal_attempts;
                     agg_successful_steals += successful_steals;
@@ -299,11 +317,15 @@ fn worker_loop<C: Communicator>(
             }
 
             MpiMsg::Shutdown => {
-                mpi_send(world, 0, &MpiMsg::Metrics {
-                    idle_time_ms,
-                    steal_attempts,
-                    successful_steals,
-                })?;
+                mpi_send(
+                    world,
+                    0,
+                    &MpiMsg::Metrics {
+                        idle_time_ms,
+                        steal_attempts,
+                        successful_steals,
+                    },
+                )?;
                 break;
             }
 
@@ -340,14 +362,30 @@ mod tests {
         let ops = vec![
             Op::new(0, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![], vec![2, 2]),
             Op::new(1, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![], vec![2, 2]),
-            Op::new(2, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![0, 1], vec![2, 2]),
-            Op::new(3, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![0, 2], vec![2, 2]),
+            Op::new(
+                2,
+                OpKind::Matmul { m: 2, n: 2, k: 2 },
+                vec![0, 1],
+                vec![2, 2],
+            ),
+            Op::new(
+                3,
+                OpKind::Matmul { m: 2, n: 2, k: 2 },
+                vec![0, 2],
+                vec![2, 2],
+            ),
         ];
         let dag = Arc::new(Dag::new(ops).unwrap());
 
         let mut sources = HashMap::new();
-        sources.insert(0usize, Tensor::from_shape_vec(&[2, 2], vec![1., 0., 0., 1.]).unwrap());
-        sources.insert(1usize, Tensor::from_shape_vec(&[2, 2], vec![1., 2., 3., 4.]).unwrap());
+        sources.insert(
+            0usize,
+            Tensor::from_shape_vec(&[2, 2], vec![1., 0., 0., 1.]).unwrap(),
+        );
+        sources.insert(
+            1usize,
+            Tensor::from_shape_vec(&[2, 2], vec![1., 2., 3., 4.]).unwrap(),
+        );
 
         match MpiWorker::new(dag, sources).run() {
             // Single-rank run (plain `cargo test`) — skip gracefully.

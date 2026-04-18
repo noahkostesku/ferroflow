@@ -3,9 +3,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use ferroflow_core::{Dag, Op, OpId, OpKind, Tensor};
-use tract_onnx::pb::{
-    tensor_shape_proto, type_proto, AttributeProto, GraphProto, ValueInfoProto,
-};
+use tract_onnx::pb::{tensor_shape_proto, type_proto, AttributeProto, GraphProto, ValueInfoProto};
 use tract_onnx::prelude::Framework;
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -59,8 +57,10 @@ pub fn dag_summary(dag: &Dag) -> String {
         }
     }
 
-    let mut breakdown: Vec<String> =
-        counts.iter().map(|(&k, &v)| format!("  {k}: {v}")).collect();
+    let mut breakdown: Vec<String> = counts
+        .iter()
+        .map(|(&k, &v)| format!("  {k}: {v}"))
+        .collect();
     breakdown.sort();
 
     format!(
@@ -87,9 +87,7 @@ fn build_dag_and_sources(graph: &GraphProto) -> Result<(Dag, HashMap<OpId, Tenso
     // Collect which initializer names need transposition (Gemm transB=1 weights).
     let mut transpose_needed: HashSet<String> = HashSet::new();
     for node in &graph.node {
-        if node.op_type == "Gemm"
-            && get_int_attr(&node.attribute, "transB").unwrap_or(0) == 1
-        {
+        if node.op_type == "Gemm" && get_int_attr(&node.attribute, "transB").unwrap_or(0) == 1 {
             if let Some(w) = node.input.get(1).filter(|s| !s.is_empty()) {
                 transpose_needed.insert(w.clone());
             }
@@ -98,8 +96,7 @@ fn build_dag_and_sources(graph: &GraphProto) -> Result<(Dag, HashMap<OpId, Tenso
 
     // Initializer names set — used to skip them if they also appear in graph.input
     // (ONNX opset < 9 includes initializers in the input list).
-    let init_names: HashSet<&str> =
-        graph.initializer.iter().map(|t| t.name.as_str()).collect();
+    let init_names: HashSet<&str> = graph.initializer.iter().map(|t| t.name.as_str()).collect();
 
     let mut tensor_to_id: HashMap<String, OpId> = HashMap::new();
     let mut ops: Vec<Op> = Vec::new();
@@ -123,8 +120,7 @@ fn build_dag_and_sources(graph: &GraphProto) -> Result<(Dag, HashMap<OpId, Tenso
         let id = ops.len();
         tensor_to_id.insert(init.name.clone(), id);
 
-        let mut shape: Vec<usize> =
-            init.dims.iter().map(|&d| d.max(1) as usize).collect();
+        let mut shape: Vec<usize> = init.dims.iter().map(|&d| d.max(1) as usize).collect();
         if shape.is_empty() {
             shape = vec![1];
         }
@@ -189,11 +185,7 @@ fn op_max_inputs(op_type: &str) -> usize {
     }
 }
 
-fn map_op_kind(
-    op_type: &str,
-    output_shape: &[usize],
-    attrs: &[AttributeProto],
-) -> Result<OpKind> {
+fn map_op_kind(op_type: &str, output_shape: &[usize], attrs: &[AttributeProto]) -> Result<OpKind> {
     let len = output_shape.iter().product::<usize>().max(1);
     match op_type {
         "MatMul" => {
@@ -345,7 +337,10 @@ mod tests {
     fn load_model_provides_source_tensor() {
         let path = write_tmp("ferroflow_relu2.onnx", RELU_ONNX);
         let (dag, sources) = load_model(&path).unwrap();
-        assert!(sources.contains_key(&0), "source tensor for input X must exist");
+        assert!(
+            sources.contains_key(&0),
+            "source tensor for input X must exist"
+        );
         assert_eq!(sources[&0].shape(), &[1, 4]);
         assert_eq!(dag.ops.len(), 2);
     }
@@ -355,7 +350,12 @@ mod tests {
         let ops = vec![
             Op::new(0, OpKind::Relu { len: 4 }, vec![], vec![4]),
             Op::new(1, OpKind::Relu { len: 4 }, vec![0], vec![4]),
-            Op::new(2, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![0, 1], vec![2, 2]),
+            Op::new(
+                2,
+                OpKind::Matmul { m: 2, n: 2, k: 2 },
+                vec![0, 1],
+                vec![2, 2],
+            ),
         ];
         let dag = Dag::new(ops).unwrap();
         let s = dag_summary(&dag);

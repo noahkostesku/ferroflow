@@ -20,7 +20,10 @@ use tokio::sync::watch;
 use state::DashboardState;
 
 #[derive(Parser)]
-#[command(name = "ferroflow-tui", about = "Live dashboard for work-stealing execution")]
+#[command(
+    name = "ferroflow-tui",
+    about = "Live dashboard for work-stealing execution"
+)]
 struct Args {
     /// Number of worker tasks.
     #[arg(long, short, default_value_t = 4)]
@@ -40,8 +43,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     // Build skewed DAG.
-    let (dag, sources) = Dag::with_skew(args.dag_size, args.skew)
-        .context("failed to build DAG")?;
+    let (dag, sources) = Dag::with_skew(args.dag_size, args.skew).context("failed to build DAG")?;
     let dag = Arc::new(dag);
     let n_workers = args.workers;
     let dag_size = dag.ops.len() as u32;
@@ -61,9 +63,8 @@ async fn main() -> anyhow::Result<()> {
     // Spawn scheduler task.
     let sched = WorkStealingScheduler::new(n_workers);
     let dag_clone = Arc::clone(&dag);
-    let sched_handle = tokio::spawn(async move {
-        sched.execute_with_watch(dag_clone, sources, tx).await
-    });
+    let sched_handle =
+        tokio::spawn(async move { sched.execute_with_watch(dag_clone, sources, tx).await });
 
     // Dashboard state.
     let mut dash = DashboardState::new(n_workers);

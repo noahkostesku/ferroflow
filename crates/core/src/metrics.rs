@@ -100,10 +100,16 @@ impl SchedulerMetrics {
         successful_steals: u64,
     ) -> Self {
         let elapsed_sec = elapsed_ms / 1000.0;
-        let throughput_ops_per_sec =
-            if elapsed_sec > 0.0 { completed_ops as f64 / elapsed_sec } else { 0.0 };
-        let steal_rate =
-            if elapsed_sec > 0.0 { successful_steals as f64 / elapsed_sec } else { 0.0 };
+        let throughput_ops_per_sec = if elapsed_sec > 0.0 {
+            completed_ops as f64 / elapsed_sec
+        } else {
+            0.0
+        };
+        let steal_rate = if elapsed_sec > 0.0 {
+            successful_steals as f64 / elapsed_sec
+        } else {
+            0.0
+        };
         Self {
             total_ops,
             completed_ops,

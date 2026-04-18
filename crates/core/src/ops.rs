@@ -9,7 +9,11 @@ use crate::tensor::Tensor;
 pub enum OpError {
     /// Wrong number of input tensors supplied.
     #[error("op {op}: expected {expected} input(s), got {got}")]
-    InputCount { op: &'static str, expected: usize, got: usize },
+    InputCount {
+        op: &'static str,
+        expected: usize,
+        got: usize,
+    },
 
     /// Tensor shapes are incompatible for this operation.
     #[error("shape mismatch: {0}")]
@@ -56,7 +60,11 @@ pub fn execute_op(op: &Op, tensors: &[&Tensor]) -> Result<Tensor, OpError> {
 
 fn require_inputs(op: &'static str, tensors: &[&Tensor], expected: usize) -> Result<(), OpError> {
     if tensors.len() != expected {
-        return Err(OpError::InputCount { op, expected, got: tensors.len() });
+        return Err(OpError::InputCount {
+            op,
+            expected,
+            got: tensors.len(),
+        });
     }
     Ok(())
 }
@@ -86,12 +94,16 @@ fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor, OpError> {
             b2.ncols()
         )));
     }
-    Ok(Tensor { data: a2.dot(&b2).into_dyn() })
+    Ok(Tensor {
+        data: a2.dot(&b2).into_dyn(),
+    })
 }
 
 /// Element-wise ReLU: out = max(0, x).
 fn relu(x: &Tensor) -> Tensor {
-    Tensor { data: x.data.map(|&v| v.max(0.0)) }
+    Tensor {
+        data: x.data.map(|&v| v.max(0.0)),
+    }
 }
 
 /// Layer normalisation: normalise all elements to mean=0, std≈1.
@@ -103,7 +115,9 @@ fn layer_norm(x: &Tensor) -> Tensor {
     let mean = x.data.sum() / n;
     let var = x.data.map(|&v| (v - mean).powi(2)).sum() / n;
     let std = (var + 1e-5).sqrt();
-    Tensor { data: x.data.map(|&v| (v - mean) / std) }
+    Tensor {
+        data: x.data.map(|&v| (v - mean) / std),
+    }
 }
 
 /// Sum-reduction along `axis`.
@@ -117,7 +131,9 @@ fn reduce(x: &Tensor, axis: usize) -> Result<Tensor, OpError> {
             x.ndim()
         )));
     }
-    Ok(Tensor { data: x.data.sum_axis(Axis(axis)).into_dyn() })
+    Ok(Tensor {
+        data: x.data.sum_axis(Axis(axis)).into_dyn(),
+    })
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────

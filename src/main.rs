@@ -78,9 +78,7 @@ enum Command {
     },
 
     /// Print a markdown comparison table from a saved RunMetrics JSON file.
-    Report {
-        input: PathBuf,
-    },
+    Report { input: PathBuf },
 
     /// Print the DAG summary (op count, edge count, type breakdown).
     ///
@@ -233,36 +231,8 @@ enum MpiSchedulerKind {
     WorkStealing,
 }
 
-// ── local DAG builders ────────────────────────────────────────────────────────
-
-fn build_uniform_dag(dag_ops: usize, dim: usize) -> (Arc<Dag>, HashMap<usize, Tensor>) {
-    let n_src = dag_ops + 1;
-    let mut ops: Vec<Op> = (0..n_src)
-        .map(|id| Op::new(id, OpKind::Matmul { m: dim, n: dim, k: dim }, vec![], vec![dim, dim]))
-        .collect();
-    let mut prev = 0usize;
-    for i in 0..dag_ops {
-        let cid = n_src + i;
-        let inputs = if i == 0 { vec![0, 1] } else { vec![prev, i + 1] };
-        ops.push(Op::new(cid, OpKind::Matmul { m: dim, n: dim, k: dim }, inputs, vec![dim, dim]));
-        prev = cid;
-    }
-    let dag = Arc::new(Dag::new(ops).expect("uniform dag is valid"));
-    let val = 1.0 / dim as f32;
-    let src = (0..n_src).map(|id| (id, Tensor::full(&[dim, dim], val))).collect();
-    (dag, src)
-}
-
-fn build_local_skewed_dag(
-    dag_ops: usize,
-    factor: u64,
-) -> (Arc<Dag>, HashMap<usize, Tensor>) {
-    let (dag, src) = Dag::with_skew(dag_ops, factor).expect("skewed dag is valid");
-    (Arc::new(dag), src)
-}
-
-fn build_synthetic_dag(
-    kind: &SyntheticDag,
+/// Groups all synthetic DAG topology parameters to avoid long argument lists.
+struct SyntheticDagParams {
     seq_len: usize,
     d_model: usize,
     n_heads: usize,
@@ -275,14 +245,72 @@ fn build_synthetic_dag(
     chain_depth: usize,
     n_short_ops: usize,
     slow_factor: u64,
+}
+
+// ── local DAG builders ────────────────────────────────────────────────────────
+
+fn build_uniform_dag(dag_ops: usize, dim: usize) -> (Arc<Dag>, HashMap<usize, Tensor>) {
+    let n_src = dag_ops + 1;
+    let mut ops: Vec<Op> = (0..n_src)
+        .map(|id| {
+            Op::new(
+                id,
+                OpKind::Matmul {
+                    m: dim,
+                    n: dim,
+                    k: dim,
+                },
+                vec![],
+                vec![dim, dim],
+            )
+        })
+        .collect();
+    let mut prev = 0usize;
+    for i in 0..dag_ops {
+        let cid = n_src + i;
+        let inputs = if i == 0 {
+            vec![0, 1]
+        } else {
+            vec![prev, i + 1]
+        };
+        ops.push(Op::new(
+            cid,
+            OpKind::Matmul {
+                m: dim,
+                n: dim,
+                k: dim,
+            },
+            inputs,
+            vec![dim, dim],
+        ));
+        prev = cid;
+    }
+    let dag = Arc::new(Dag::new(ops).expect("uniform dag is valid"));
+    let val = 1.0 / dim as f32;
+    let src = (0..n_src)
+        .map(|id| (id, Tensor::full(&[dim, dim], val)))
+        .collect();
+    (dag, src)
+}
+
+fn build_local_skewed_dag(dag_ops: usize, factor: u64) -> (Arc<Dag>, HashMap<usize, Tensor>) {
+    let (dag, src) = Dag::with_skew(dag_ops, factor).expect("skewed dag is valid");
+    (Arc::new(dag), src)
+}
+
+fn build_synthetic_dag(
+    kind: &SyntheticDag,
+    p: &SyntheticDagParams,
 ) -> anyhow::Result<(Arc<Dag>, std::collections::HashMap<usize, Tensor>)> {
     let (dag, src) = match kind {
-        SyntheticDag::Transformer => gen_transformer_block(seq_len, d_model, n_heads)?,
-        SyntheticDag::Wide => gen_wide_dag(width, depth, skew)?,
-        SyntheticDag::Resnet => gen_resnet_block(channels)?,
-        SyntheticDag::LargeTransformer => gen_large_transformer(layers, d_model)?,
-        SyntheticDag::LargeWide => gen_large_wide(width, depth, skew)?,
-        SyntheticDag::Imbalanced => gen_imbalanced(n_long_chains, chain_depth, n_short_ops, slow_factor)?,
+        SyntheticDag::Transformer => gen_transformer_block(p.seq_len, p.d_model, p.n_heads)?,
+        SyntheticDag::Wide => gen_wide_dag(p.width, p.depth, p.skew)?,
+        SyntheticDag::Resnet => gen_resnet_block(p.channels)?,
+        SyntheticDag::LargeTransformer => gen_large_transformer(p.layers, p.d_model)?,
+        SyntheticDag::LargeWide => gen_large_wide(p.width, p.depth, p.skew)?,
+        SyntheticDag::Imbalanced => {
+            gen_imbalanced(p.n_long_chains, p.chain_depth, p.n_short_ops, p.slow_factor)?
+        }
     };
     Ok((Arc::new(dag), src))
 }
@@ -307,8 +335,10 @@ fn synthetic_dag_summary(dag: &Dag) -> String {
         }
     }
 
-    let mut breakdown: Vec<String> =
-        counts.iter().map(|(&k, &v)| format!("  {k}: {v}")).collect();
+    let mut breakdown: Vec<String> = counts
+        .iter()
+        .map(|(&k, &v)| format!("  {k}: {v}"))
+        .collect();
     breakdown.sort();
     format!(
         "{n_ops} ops ({n_sources} sources, {n_compute} compute), {n_edges} edges\n{}",
@@ -324,10 +354,7 @@ fn synthetic_dag_summary(dag: &Dag) -> String {
 /// `n_workers` workers, each worker gets `n_ops / n_workers` ops — perfectly
 /// balanced.
 #[cfg(feature = "distributed")]
-fn build_mpi_uniform_dag(
-    n_ops: usize,
-    duration_ms: u64,
-) -> (Arc<Dag>, HashMap<usize, Tensor>) {
+fn build_mpi_uniform_dag(n_ops: usize, duration_ms: u64) -> (Arc<Dag>, HashMap<usize, Tensor>) {
     let mut ops = vec![Op::new(0, OpKind::Relu { len: 1 }, vec![], vec![1])];
     for id in 1..=n_ops {
         ops.push(Op::new(id, OpKind::Slow { duration_ms }, vec![0], vec![1]));
@@ -357,7 +384,12 @@ fn build_mpi_skewed_dag(
     let mut ops = vec![Op::new(0, OpKind::Relu { len: 1 }, vec![], vec![1])];
     for id in 1..=n_ops {
         let ms = if id % 2 == 1 { slow_ms } else { duration_ms };
-        ops.push(Op::new(id, OpKind::Slow { duration_ms: ms }, vec![0], vec![1]));
+        ops.push(Op::new(
+            id,
+            OpKind::Slow { duration_ms: ms },
+            vec![0],
+            vec![1],
+        ));
     }
     let dag = Arc::new(Dag::new(ops).expect("mpi skewed dag is valid"));
     let sources = HashMap::from([(0usize, Tensor::full(&[1], 1.0))]);
@@ -387,7 +419,11 @@ fn make_run_metrics(
 fn idle_pct(r: &RunMetrics) -> f64 {
     let w = r.workers_per_node.max(1) as f64;
     let total = r.metrics.elapsed_ms * w;
-    if total > 0.0 { r.metrics.idle_time_ms / total * 100.0 } else { 0.0 }
+    if total > 0.0 {
+        r.metrics.idle_time_ms / total * 100.0
+    } else {
+        0.0
+    }
 }
 
 fn print_report(entries: &[RunMetrics]) {
@@ -396,7 +432,10 @@ fn print_report(entries: &[RunMetrics]) {
         "| {:<16} | {:>5} | {:<7} | {:>14} | {:>6} | {:>10} |",
         "Scheduler", "Nodes", "DAG", "Throughput", "Idle%", "Steal Rate"
     );
-    println!("|{:-<18}|{:-<7}|{:-<9}|{:-<16}|{:-<8}|{:-<12}|", "", "", "", "", "", "");
+    println!(
+        "|{:-<18}|{:-<7}|{:-<9}|{:-<16}|{:-<8}|{:-<12}|",
+        "", "", "", "", "", ""
+    );
     for r in entries {
         println!(
             "| {:<16} | {:>5} | {:<7} | {:>13.0} /s | {:>5.1}% | {:>9.1}/s |",
@@ -414,7 +453,11 @@ fn print_report(entries: &[RunMetrics]) {
 fn append_json(path: &PathBuf, new_entries: &[RunMetrics]) -> Result<()> {
     let mut existing: Vec<RunMetrics> = if path.exists() {
         let raw = std::fs::read_to_string(path)?;
-        if raw.trim().is_empty() { vec![] } else { serde_json::from_str(&raw)? }
+        if raw.trim().is_empty() {
+            vec![]
+        } else {
+            serde_json::from_str(&raw)?
+        }
     } else {
         vec![]
     };
@@ -443,8 +486,8 @@ async fn run_local_bench(
     let dag_label = if skew { "skewed" } else { "uniform" };
     let mut results: Vec<RunMetrics> = Vec::new();
 
-    let (_, m) = SequentialExecutor::execute(&arc_dag, src.clone())
-        .context("sequential executor failed")?;
+    let (_, m) =
+        SequentialExecutor::execute(&arc_dag, src.clone()).context("sequential executor failed")?;
     let r = make_run_metrics("sequential", skew, nodes, 1, dag_size, m);
     println!(
         "[bench] sequential/{dag_label}: {:.1} ms  ({:.0} ops/s)",
@@ -482,9 +525,12 @@ async fn run_local_bench(
     results.push(r);
 
     if let Some(path) = output {
-        append_json(&path, &results)
-            .with_context(|| format!("writing {}", path.display()))?;
-        println!("[bench] appended {} entries → {}", results.len(), path.display());
+        append_json(&path, &results).with_context(|| format!("writing {}", path.display()))?;
+        println!(
+            "[bench] appended {} entries → {}",
+            results.len(),
+            path.display()
+        );
     }
     Ok(())
 }
@@ -554,18 +600,7 @@ fn run_mpi_bench(
 fn run_info(
     model: Option<&PathBuf>,
     dag: Option<&SyntheticDag>,
-    seq_len: usize,
-    d_model: usize,
-    n_heads: usize,
-    width: usize,
-    depth: usize,
-    skew: f32,
-    channels: usize,
-    layers: usize,
-    n_long_chains: usize,
-    chain_depth: usize,
-    n_short_ops: usize,
-    slow_factor: u64,
+    p: &SyntheticDagParams,
 ) -> Result<()> {
     match (model, dag) {
         (Some(path), None) => {
@@ -574,9 +609,7 @@ fn run_info(
             println!("{}", dag_summary(&parsed));
         }
         (None, Some(kind)) => {
-            let (arc_dag, _) =
-                build_synthetic_dag(kind, seq_len, d_model, n_heads, width, depth, skew, channels, layers, n_long_chains, chain_depth, n_short_ops, slow_factor)
-                    .context("building synthetic DAG")?;
+            let (arc_dag, _) = build_synthetic_dag(kind, p).context("building synthetic DAG")?;
             println!("{}", synthetic_dag_summary(&arc_dag));
         }
         _ => anyhow::bail!("supply exactly one of --model or --dag"),
@@ -590,39 +623,37 @@ async fn run_model(
     workers: usize,
     scheduler: OnnxScheduler,
     steal_threshold: usize,
-    seq_len: usize,
-    d_model: usize,
-    n_heads: usize,
-    width: usize,
-    depth: usize,
-    skew: f32,
-    channels: usize,
-    layers: usize,
-    n_long_chains: usize,
-    chain_depth: usize,
-    n_short_ops: usize,
-    slow_factor: u64,
+    p: &SyntheticDagParams,
 ) -> Result<()> {
     let (arc_dag, sources, is_skew, label) = match (model, dag) {
         (Some(path), None) => {
-            let (d, s) = load_model(path)
-                .with_context(|| format!("loading {}", path.display()))?;
+            let (d, s) = load_model(path).with_context(|| format!("loading {}", path.display()))?;
             let arc = std::sync::Arc::new(d);
             println!("{}", dag_summary(&arc));
             (arc, s, false, "onnx".to_string())
         }
         (None, Some(kind)) => {
-            let (arc, s) =
-                build_synthetic_dag(kind, seq_len, d_model, n_heads, width, depth, skew, channels, layers, n_long_chains, chain_depth, n_short_ops, slow_factor)
-                    .context("building synthetic DAG")?;
-            let skewed = matches!(kind, SyntheticDag::Wide | SyntheticDag::LargeWide | SyntheticDag::Imbalanced);
+            let (arc, s) = build_synthetic_dag(kind, p).context("building synthetic DAG")?;
+            let skewed = matches!(
+                kind,
+                SyntheticDag::Wide | SyntheticDag::LargeWide | SyntheticDag::Imbalanced
+            );
             let lbl = match kind {
                 SyntheticDag::Transformer => "transformer".to_string(),
-                SyntheticDag::Wide => format!("wide({}x{},skew={:.2})", width, depth, skew),
+                SyntheticDag::Wide => format!("wide({}x{},skew={:.2})", p.width, p.depth, p.skew),
                 SyntheticDag::Resnet => "resnet".to_string(),
-                SyntheticDag::LargeTransformer => format!("large-transformer({}L,d={})", layers, d_model),
-                SyntheticDag::LargeWide => format!("large-wide({}x{},skew={:.2})", width, depth, skew),
-                SyntheticDag::Imbalanced => format!("imbalanced({}-heavy×{}ms,{}-fast)", n_long_chains, chain_depth as u64 * slow_factor, n_short_ops),
+                SyntheticDag::LargeTransformer => {
+                    format!("large-transformer({}L,d={})", p.layers, p.d_model)
+                }
+                SyntheticDag::LargeWide => {
+                    format!("large-wide({}x{},skew={:.2})", p.width, p.depth, p.skew)
+                }
+                SyntheticDag::Imbalanced => format!(
+                    "imbalanced({}-heavy×{}ms,{}-fast)",
+                    p.n_long_chains,
+                    p.chain_depth as u64 * p.slow_factor,
+                    p.n_short_ops
+                ),
             };
             println!("{}", synthetic_dag_summary(&arc));
             (arc, s, skewed, lbl)
@@ -647,8 +678,7 @@ async fn run_model(
             ("static", m)
         }
         OnnxScheduler::WorkStealing => {
-            let sched = WorkStealingScheduler::new(workers)
-                .with_steal_threshold(steal_threshold);
+            let sched = WorkStealingScheduler::new(workers).with_steal_threshold(steal_threshold);
             let (_, m) = sched
                 .execute(std::sync::Arc::clone(&arc_dag), sources)
                 .await
@@ -683,9 +713,16 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Command::Bench { dag, workers, nodes, dag_ops, skew_factor, chain_dim, output } => {
-            run_local_bench(dag, workers, nodes, dag_ops, skew_factor, chain_dim, output)
-                .await?;
+        Command::Bench {
+            dag,
+            workers,
+            nodes,
+            dag_ops,
+            skew_factor,
+            chain_dim,
+            output,
+        } => {
+            run_local_bench(dag, workers, nodes, dag_ops, skew_factor, chain_dim, output).await?;
         }
 
         Command::Report { input } => {
@@ -696,10 +733,23 @@ async fn main() -> Result<()> {
             print_report(&entries);
         }
 
-        Command::Info { model, dag, seq_len, d_model, n_heads, width, depth, skew, channels, layers, n_long_chains, chain_depth, n_short_ops, slow_factor } => {
-            run_info(
-                model.as_ref(),
-                dag.as_ref(),
+        Command::Info {
+            model,
+            dag,
+            seq_len,
+            d_model,
+            n_heads,
+            width,
+            depth,
+            skew,
+            channels,
+            layers,
+            n_long_chains,
+            chain_depth,
+            n_short_ops,
+            slow_factor,
+        } => {
+            let p = SyntheticDagParams {
                 seq_len,
                 d_model,
                 n_heads,
@@ -712,7 +762,8 @@ async fn main() -> Result<()> {
                 chain_depth,
                 n_short_ops,
                 slow_factor,
-            )?;
+            };
+            run_info(model.as_ref(), dag.as_ref(), &p)?;
         }
 
         Command::Run {
@@ -734,12 +785,7 @@ async fn main() -> Result<()> {
             n_short_ops,
             slow_factor,
         } => {
-            run_model(
-                model.as_ref(),
-                dag.as_ref(),
-                workers,
-                scheduler,
-                steal_threshold,
+            let p = SyntheticDagParams {
                 seq_len,
                 d_model,
                 n_heads,
@@ -752,6 +798,14 @@ async fn main() -> Result<()> {
                 chain_depth,
                 n_short_ops,
                 slow_factor,
+            };
+            run_model(
+                model.as_ref(),
+                dag.as_ref(),
+                workers,
+                scheduler,
+                steal_threshold,
+                &p,
             )
             .await?;
         }
@@ -766,7 +820,15 @@ async fn main() -> Result<()> {
             nodes,
             output,
         } => {
-            run_mpi_bench(dag, scheduler, n_ops, op_duration_ms, skew_factor, nodes, output)?;
+            run_mpi_bench(
+                dag,
+                scheduler,
+                n_ops,
+                op_duration_ms,
+                skew_factor,
+                nodes,
+                output,
+            )?;
         }
     }
 

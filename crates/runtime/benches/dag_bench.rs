@@ -29,16 +29,33 @@ fn build_uniform_dag(chain_len: usize, dim: usize) -> (Arc<Dag>, HashMap<usize, 
     let mut ops: Vec<Op> = Vec::new();
 
     for id in 0..n_sources {
-        ops.push(Op::new(id, OpKind::Matmul { m: dim, n: dim, k: dim }, vec![], vec![dim, dim]));
+        ops.push(Op::new(
+            id,
+            OpKind::Matmul {
+                m: dim,
+                n: dim,
+                k: dim,
+            },
+            vec![],
+            vec![dim, dim],
+        ));
     }
 
     let mut prev_id = 0usize;
     for i in 0..chain_len {
         let compute_id = n_sources + i;
-        let input_ids = if i == 0 { vec![0, 1] } else { vec![prev_id, i + 1] };
+        let input_ids = if i == 0 {
+            vec![0, 1]
+        } else {
+            vec![prev_id, i + 1]
+        };
         ops.push(Op::new(
             compute_id,
-            OpKind::Matmul { m: dim, n: dim, k: dim },
+            OpKind::Matmul {
+                m: dim,
+                n: dim,
+                k: dim,
+            },
             input_ids,
             vec![dim, dim],
         ));
@@ -47,14 +64,15 @@ fn build_uniform_dag(chain_len: usize, dim: usize) -> (Arc<Dag>, HashMap<usize, 
 
     let dag = Arc::new(Dag::new(ops).expect("uniform dag is acyclic"));
     let val = 1.0 / dim as f32;
-    let sources = (0..n_sources).map(|id| (id, Tensor::full(&[dim, dim], val))).collect();
+    let sources = (0..n_sources)
+        .map(|id| (id, Tensor::full(&[dim, dim], val)))
+        .collect();
     (dag, sources)
 }
 
 /// Two-branch skewed DAG via [`Dag::with_skew`].
 fn build_skewed_dag(n_ops: usize, factor: u64) -> (Arc<Dag>, HashMap<usize, Tensor>) {
-    let (dag, sources) =
-        Dag::with_skew(n_ops, factor).expect("skewed dag is valid");
+    let (dag, sources) = Dag::with_skew(n_ops, factor).expect("skewed dag is valid");
     (Arc::new(dag), sources)
 }
 
@@ -91,12 +109,24 @@ fn collect_all_metrics() -> Vec<RunMetrics> {
     let (dag, src) = build_uniform_dag(CHAIN_LEN, CHAIN_DIM);
     let sched = StaticScheduler::new(&dag, N_WORKERS);
     let (_, m) = rt.block_on(sched.execute(Arc::clone(&dag), src)).unwrap();
-    results.push(make_run_metrics("static", false, dag.len(), N_WORKERS as u32, m));
+    results.push(make_run_metrics(
+        "static",
+        false,
+        dag.len(),
+        N_WORKERS as u32,
+        m,
+    ));
 
     let (dag, src) = build_uniform_dag(CHAIN_LEN, CHAIN_DIM);
     let sched = WorkStealingScheduler::new(N_WORKERS);
     let (_, m) = rt.block_on(sched.execute(Arc::clone(&dag), src)).unwrap();
-    results.push(make_run_metrics("work-stealing", false, dag.len(), N_WORKERS as u32, m));
+    results.push(make_run_metrics(
+        "work-stealing",
+        false,
+        dag.len(),
+        N_WORKERS as u32,
+        m,
+    ));
 
     // ── skewed ───────────────────────────────────────────────────────────────
 
@@ -107,12 +137,24 @@ fn collect_all_metrics() -> Vec<RunMetrics> {
     let (dag, src) = build_skewed_dag(CHAIN_LEN, SLOW_BRANCH_FACTOR);
     let sched = StaticScheduler::new(&dag, N_WORKERS);
     let (_, m) = rt.block_on(sched.execute(Arc::clone(&dag), src)).unwrap();
-    results.push(make_run_metrics("static", true, dag.len(), N_WORKERS as u32, m));
+    results.push(make_run_metrics(
+        "static",
+        true,
+        dag.len(),
+        N_WORKERS as u32,
+        m,
+    ));
 
     let (dag, src) = build_skewed_dag(CHAIN_LEN, SLOW_BRANCH_FACTOR);
     let sched = WorkStealingScheduler::new(N_WORKERS);
     let (_, m) = rt.block_on(sched.execute(Arc::clone(&dag), src)).unwrap();
-    results.push(make_run_metrics("work-stealing", true, dag.len(), N_WORKERS as u32, m));
+    results.push(make_run_metrics(
+        "work-stealing",
+        true,
+        dag.len(),
+        N_WORKERS as u32,
+        m,
+    ));
 
     results
 }
@@ -135,7 +177,10 @@ fn print_markdown_table(results: &[RunMetrics]) {
         "| {:<13} | {:<7} | {:>14} | {:>6} | {:>10} |",
         "Scheduler", "DAG", "Throughput", "Idle%", "Steal Rate"
     );
-    println!("|{:-<15}|{:-<9}|{:-<16}|{:-<8}|{:-<12}|", "", "", "", "", "");
+    println!(
+        "|{:-<15}|{:-<9}|{:-<16}|{:-<8}|{:-<12}|",
+        "", "", "", "", ""
+    );
     for r in results {
         let dag_label = if r.skew { "skewed" } else { "uniform" };
         let throughput = format!("{:.0} ops/s", r.metrics.throughput_ops_per_sec);
@@ -151,8 +196,8 @@ fn print_markdown_table(results: &[RunMetrics]) {
 
 fn save_json(results: &[RunMetrics]) {
     let json = serde_json::to_string_pretty(results).expect("serialize results");
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/benchmark_results.json");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/benchmark_results.json");
     if let Err(e) = std::fs::write(&path, &json) {
         eprintln!("warning: could not save benchmark_results.json: {e}");
     } else {
@@ -168,7 +213,11 @@ fn bench_sequential_uniform(c: &mut Criterion) {
         &format!("sequential_uniform_{CHAIN_LEN}op_{CHAIN_DIM}x{CHAIN_DIM}"),
         |b| {
             b.iter(|| {
-                black_box(SequentialExecutor::execute(black_box(&dag), sources.clone()).unwrap().0)
+                black_box(
+                    SequentialExecutor::execute(black_box(&dag), sources.clone())
+                        .unwrap()
+                        .0,
+                )
             })
         },
     );
@@ -187,7 +236,9 @@ fn bench_static_uniform(c: &mut Criterion) {
         |b| {
             b.iter(|| {
                 black_box(
-                    rt.block_on(sched.execute(Arc::clone(&dag), sources.clone())).unwrap().0,
+                    rt.block_on(sched.execute(Arc::clone(&dag), sources.clone()))
+                        .unwrap()
+                        .0,
                 )
             })
         },
@@ -207,7 +258,9 @@ fn bench_workstealing_uniform(c: &mut Criterion) {
         |b| {
             b.iter(|| {
                 black_box(
-                    rt.block_on(sched.execute(Arc::clone(&dag), sources.clone())).unwrap().0,
+                    rt.block_on(sched.execute(Arc::clone(&dag), sources.clone()))
+                        .unwrap()
+                        .0,
                 )
             })
         },
@@ -218,7 +271,11 @@ fn bench_sequential_skewed(c: &mut Criterion) {
     let (dag, sources) = build_skewed_dag(CHAIN_LEN, SLOW_BRANCH_FACTOR);
     c.bench_function("sequential_skewed_20op_factor5", |b| {
         b.iter(|| {
-            black_box(SequentialExecutor::execute(black_box(&dag), sources.clone()).unwrap().0)
+            black_box(
+                SequentialExecutor::execute(black_box(&dag), sources.clone())
+                    .unwrap()
+                    .0,
+            )
         })
     });
 }
@@ -234,7 +291,9 @@ fn bench_static_skewed(c: &mut Criterion) {
     c.bench_function(&format!("static_{N_WORKERS}w_skewed_20op_factor5"), |b| {
         b.iter(|| {
             black_box(
-                rt.block_on(sched.execute(Arc::clone(&dag), sources.clone())).unwrap().0,
+                rt.block_on(sched.execute(Arc::clone(&dag), sources.clone()))
+                    .unwrap()
+                    .0,
             )
         })
     });
@@ -251,7 +310,9 @@ fn bench_workstealing_skewed(c: &mut Criterion) {
     c.bench_function(&format!("ws_{N_WORKERS}w_skewed_20op_factor5"), |b| {
         b.iter(|| {
             black_box(
-                rt.block_on(sched.execute(Arc::clone(&dag), sources.clone())).unwrap().0,
+                rt.block_on(sched.execute(Arc::clone(&dag), sources.clone()))
+                    .unwrap()
+                    .0,
             )
         })
     });

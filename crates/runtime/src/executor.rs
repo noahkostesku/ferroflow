@@ -26,6 +26,9 @@ pub enum ExecutorError {
         #[source]
         source: OpError,
     },
+    /// Internal invariant violated; indicates a bug in the executor.
+    #[error("internal error: {0}")]
+    Internal(&'static str),
 }
 
 /// Single-threaded baseline executor.
@@ -66,7 +69,9 @@ impl SequentialExecutor {
                 continue;
             }
 
-            let op = dag.get_op(op_id).expect("topological_sort only yields valid ids");
+            let op = dag.get_op(op_id).ok_or(ExecutorError::Internal(
+                "topological_sort only yields valid ids",
+            ))?;
 
             let inputs: Vec<&Tensor> = op
                 .input_ids
@@ -79,8 +84,11 @@ impl SequentialExecutor {
                 .collect::<Result<_, _>>()?;
 
             let op_name = op_kind_name(&op.kind);
-            let output = execute_op(op, &inputs)
-                .map_err(|source| ExecutorError::OpFailed { op_id, op_name, source })?;
+            let output = execute_op(op, &inputs).map_err(|source| ExecutorError::OpFailed {
+                op_id,
+                op_name,
+                source,
+            })?;
 
             store.insert(op_id, output);
             completed_ops += 1;
@@ -114,7 +122,7 @@ mod tests {
     #[test]
     fn linear_relu_chain() {
         let ops = vec![
-            Op::new(0, OpKind::Relu { len: 4 }, vec![], vec![4]),   // source
+            Op::new(0, OpKind::Relu { len: 4 }, vec![], vec![4]), // source
             Op::new(1, OpKind::Relu { len: 4 }, vec![0], vec![4]),
             Op::new(2, OpKind::Relu { len: 4 }, vec![1], vec![4]),
             Op::new(3, OpKind::Relu { len: 4 }, vec![2], vec![4]),
@@ -128,7 +136,10 @@ mod tests {
         let (results, _) = SequentialExecutor::execute(&dag, sources).unwrap();
 
         let out: Vec<f32> = results[&3].data.iter().copied().collect();
-        assert!(out.iter().all(|&v| v >= 0.0), "relu output must be non-negative: {out:?}");
+        assert!(
+            out.iter().all(|&v| v >= 0.0),
+            "relu output must be non-negative: {out:?}"
+        );
         assert_eq!(out[3], 2.0);
     }
 
@@ -138,16 +149,27 @@ mod tests {
     #[test]
     fn diamond_matmul() {
         let ops = vec![
-            Op::new(0, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![], vec![2, 2]),  // A source
-            Op::new(1, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![], vec![2, 2]),  // B source
-            Op::new(2, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![0, 1], vec![2, 2]),
+            Op::new(0, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![], vec![2, 2]), // A source
+            Op::new(1, OpKind::Matmul { m: 2, n: 2, k: 2 }, vec![], vec![2, 2]), // B source
+            Op::new(
+                2,
+                OpKind::Matmul { m: 2, n: 2, k: 2 },
+                vec![0, 1],
+                vec![2, 2],
+            ),
         ];
         let dag = Dag::new(ops).unwrap();
 
         let mut sources = HashMap::new();
         // A = I, B = [[1,2],[3,4]] → A·B = [[1,2],[3,4]]
-        sources.insert(0usize, Tensor::from_shape_vec(&[2, 2], vec![1., 0., 0., 1.]).unwrap());
-        sources.insert(1usize, Tensor::from_shape_vec(&[2, 2], vec![1., 2., 3., 4.]).unwrap());
+        sources.insert(
+            0usize,
+            Tensor::from_shape_vec(&[2, 2], vec![1., 0., 0., 1.]).unwrap(),
+        );
+        sources.insert(
+            1usize,
+            Tensor::from_shape_vec(&[2, 2], vec![1., 2., 3., 4.]).unwrap(),
+        );
 
         let (results, _) = SequentialExecutor::execute(&dag, sources).unwrap();
         let flat: Vec<f32> = results[&2].data.iter().copied().collect();
