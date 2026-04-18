@@ -12,7 +12,7 @@ use tokio::sync::{watch, Mutex};
 use crate::static_scheduler::SchedulerError;
 use crate::worker::WorkQueue;
 
-const STEAL_THRESHOLD: usize = 2;
+const DEFAULT_STEAL_THRESHOLD: usize = 2;
 const STATUS_IDLE: u8 = 0;
 const STATUS_EXEC: u8 = 1;
 const STATUS_STEAL: u8 = 2;
@@ -27,19 +27,27 @@ pub type WorkStealingError = SchedulerError;
 ///
 /// Workers start with a static round-robin assignment and steal ops from
 /// busy peers when their own queue empties.  Stealing respects a threshold:
-/// a worker is only stolen from when its queue length exceeds
-/// [`STEAL_THRESHOLD`] (currently 2), preventing starvation of the victim.
-/// Failed steal attempts back off with a deterministic pseudo-random delay
-/// in the range 10–50 ms.
+/// a worker is only stolen from when its queue length exceeds `steal_threshold`
+/// (default 2), preventing starvation of the victim.  Failed steal attempts
+/// back off with a deterministic pseudo-random delay in the range 10–50 ms.
 pub struct WorkStealingScheduler {
     n_workers: usize,
+    steal_threshold: usize,
 }
 
 impl WorkStealingScheduler {
-    /// Creates a new `WorkStealingScheduler` with `n_workers` concurrent workers.
+    /// Creates a new `WorkStealingScheduler` with `n_workers` concurrent workers
+    /// and the default steal threshold of 2.
     pub fn new(n_workers: usize) -> Self {
         assert!(n_workers > 0, "n_workers must be at least 1");
-        Self { n_workers }
+        Self { n_workers, steal_threshold: DEFAULT_STEAL_THRESHOLD }
+    }
+
+    /// Sets the steal threshold (minimum victim queue depth before stealing is
+    /// allowed) and returns `self`.
+    pub fn with_steal_threshold(mut self, threshold: usize) -> Self {
+        self.steal_threshold = threshold;
+        self
     }
 
     /// Executes `dag` returning the complete tensor store and execution metrics.
@@ -76,6 +84,7 @@ impl WorkStealingScheduler {
         metrics_tx: watch::Sender<LiveMetrics>,
     ) -> Result<(HashMap<OpId, Tensor>, SchedulerMetrics), WorkStealingError> {
         let n = self.n_workers;
+        let steal_threshold = self.steal_threshold;
         let total_ops =
             dag.ops.iter().filter(|op| !op.input_ids.is_empty()).count() as u64;
 
@@ -208,7 +217,7 @@ impl WorkStealingScheduler {
                                 let victim = (worker_id + offset) % n;
                                 steal_attempts.fetch_add(1, Ordering::Relaxed);
                                 if let Some(id) =
-                                    queues[victim].steal_if_above(STEAL_THRESHOLD).await
+                                    queues[victim].steal_if_above(steal_threshold).await
                                 {
                                     successful_steals.fetch_add(1, Ordering::Relaxed);
                                     stolen = Some(id);

@@ -1,14 +1,13 @@
 """
-Generate ferroflow strong-scaling plots from docs/scaling_results.json.
+Generate ferroflow strong-scaling plots from docs/data/scaling_results.json.
 
 Outputs:
-  docs/scaling_throughput.png  — throughput vs nodes (4 series + ideal)
-  docs/scaling_efficiency.png  — parallel efficiency vs nodes (WS series only)
-  docs/steal_rate.png          — steal rate vs nodes (WS series only)
+  docs/plots/scaling_throughput.png  — throughput vs nodes (2 subplots, one per DAG)
+  docs/plots/scaling_efficiency.png  — parallel efficiency vs nodes
+  docs/plots/steal_rate.png          — steal rate vs nodes (WS only)
 """
 
 import json
-import math
 import pathlib
 
 import matplotlib
@@ -17,44 +16,53 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 RESULTS = pathlib.Path(__file__).parent.parent / "docs" / "data" / "scaling_results.json"
-DOCS    = pathlib.Path(__file__).parent.parent / "docs" / "plots"
+PLOTS   = pathlib.Path(__file__).parent.parent / "docs" / "plots"
 
 DARK_BG  = "#1c1c1e"
 GRID_COL = "#3a3a3c"
 
+# Colours keyed by (dag, scheduler)
 COLORS = {
-    ("transformer", "static"):        "#4fc3f7",  # light blue
-    ("transformer", "work-stealing"): "#0288d1",  # mid blue
-    ("wide",        "static"):        "#f48fb1",  # light pink
-    ("wide",        "work-stealing"): "#c2185b",  # deep pink
+    ("large-transformer", "static"):        "#4fc3f7",
+    ("large-transformer", "work-stealing"): "#0288d1",
+    ("large-wide",        "static"):        "#f48fb1",
+    ("large-wide",        "work-stealing"): "#c2185b",
 }
 LABELS = {
-    ("transformer", "static"):        "transformer / static",
-    ("transformer", "work-stealing"): "transformer / WS",
-    ("wide",        "static"):        "wide-skewed / static",
-    ("wide",        "work-stealing"): "wide-skewed / WS",
+    ("large-transformer", "static"):        "large-transformer / static",
+    ("large-transformer", "work-stealing"): "large-transformer / WS",
+    ("large-wide",        "static"):        "large-wide / static",
+    ("large-wide",        "work-stealing"): "large-wide / WS",
 }
+DAG_TITLES = {
+    "large-transformer": "Large Transformer (137 ops, 8 layers)",
+    "large-wide":        "Large Wide (321 ops, flat fan-out, skew=0.47)",
+}
+
 
 def load(path):
     with open(path) as f:
         return json.load(f)
+
 
 def series(data, dag, scheduler):
     rows = sorted(
         [r for r in data if r["dag"] == dag and r["scheduler"] == scheduler],
         key=lambda r: r["nodes"],
     )
-    nodes        = [r["nodes"]       for r in rows]
-    throughput   = [r["throughput"]  for r in rows]
-    efficiency   = [r["efficiency"]  for r in rows]
-    steal_rate   = [r["steal_rate"]  for r in rows]
-    return nodes, throughput, efficiency, steal_rate
+    return (
+        [r["nodes"]      for r in rows],
+        [r["throughput"] for r in rows],
+        [r["efficiency"] for r in rows],
+        [r["steal_rate"] for r in rows],
+    )
+
 
 def style_ax(ax):
     ax.set_facecolor(DARK_BG)
     ax.tick_params(colors="white")
-    ax.spines["bottom"].set_color(GRID_COL)
-    ax.spines["left"].set_color(GRID_COL)
+    for spine in ("bottom", "left"):
+        ax.spines[spine].set_color(GRID_COL)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     ax.xaxis.label.set_color("white")
@@ -62,137 +70,141 @@ def style_ax(ax):
     ax.title.set_color("white")
     ax.grid(True, color=GRID_COL, linestyle="--", linewidth=0.6, alpha=0.7)
 
+
 def save_fig(fig, path):
     fig.savefig(path, dpi=150, bbox_inches="tight", facecolor=DARK_BG)
     plt.close(fig)
     print(f"  wrote {path}")
 
+
 # ---------------------------------------------------------------------------
-# Plot 1 — Throughput
+# Plot 1 — Throughput (two subplots — DAGs have very different scales)
 # ---------------------------------------------------------------------------
 def plot_throughput(data):
-    fig, ax = plt.subplots(figsize=(8, 5))
+    dags = ["large-transformer", "large-wide"]
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     fig.patch.set_facecolor(DARK_BG)
-    style_ax(ax)
+    fig.suptitle("ferroflow Strong Scaling — Throughput", color="white", fontsize=13)
 
     all_nodes = sorted({r["nodes"] for r in data})
 
-    for (dag, sched), color in COLORS.items():
-        nodes, tput, _, _ = series(data, dag, sched)
-        ax.plot(nodes, tput, marker="o", linewidth=2, markersize=6,
-                color=color, label=LABELS[(dag, sched)])
+    for ax, dag in zip(axes, dags):
+        style_ax(ax)
 
-    # ideal linear scaling anchored at the mean 2-node throughput
-    base_values = [r["throughput"] for r in data if r["nodes"] == min(all_nodes)]
-    base = np.mean(base_values)
-    base_nodes = min(all_nodes)
-    ideal_nodes = np.array([base_nodes, max(all_nodes)])
-    ideal_tput  = base * (ideal_nodes / base_nodes)
-    ax.plot(ideal_nodes, ideal_tput, linestyle=":", linewidth=1.5,
-            color="#aaaaaa", label="ideal (linear)", alpha=0.7)
+        for sched in ("static", "work-stealing"):
+            nodes, tput, _, _ = series(data, dag, sched)
+            ax.plot(nodes, tput, marker="o", linewidth=2, markersize=6,
+                    color=COLORS[(dag, sched)], label=LABELS[(dag, sched)])
 
-    ax.set_xscale("log", base=2)
-    ax.set_xticks(all_nodes)
-    ax.set_xticklabels([str(n) for n in all_nodes])
-    ax.set_xlabel("Nodes")
-    ax.set_ylabel("Throughput (ops/s)")
-    ax.set_title("ferroflow Strong Scaling — Throughput")
-    ax.legend(framealpha=0.2, labelcolor="white",
-              facecolor=DARK_BG, edgecolor=GRID_COL)
+        # ideal linear line anchored at 2-node WS throughput
+        base_nodes_list, base_tput_list, _, _ = series(data, dag, "work-stealing")
+        base_n = base_nodes_list[0]
+        base_t = base_tput_list[0]
+        ideal_x = np.array([base_n, max(all_nodes)])
+        ideal_y = base_t * (ideal_x / base_n)
+        ax.plot(ideal_x, ideal_y, linestyle=":", linewidth=1.4,
+                color="#aaaaaa", label="ideal (linear)", alpha=0.7)
 
-    save_fig(fig, DOCS / "scaling_throughput.png")
+        ax.set_xscale("log", base=2)
+        ax.set_xticks(all_nodes)
+        ax.set_xticklabels([str(n) for n in all_nodes])
+        ax.set_xlabel("Nodes")
+        ax.set_ylabel("Throughput (ops/s)")
+        ax.set_title(DAG_TITLES[dag], fontsize=10)
+        ax.legend(framealpha=0.2, labelcolor="white",
+                  facecolor=DARK_BG, edgecolor=GRID_COL, fontsize=8)
+
+    fig.tight_layout()
+    save_fig(fig, PLOTS / "scaling_throughput.png")
+
 
 # ---------------------------------------------------------------------------
-# Plot 2 — Parallel efficiency (WS only)
+# Plot 2 — Parallel efficiency (both DAGs, WS series only)
 # ---------------------------------------------------------------------------
 def plot_efficiency(data):
     fig, ax = plt.subplots(figsize=(8, 5))
     fig.patch.set_facecolor(DARK_BG)
     style_ax(ax)
 
-    ws_keys = [k for k in COLORS if k[1] == "work-stealing"]
+    all_nodes = sorted({r["nodes"] for r in data})
 
-    for (dag, sched) in ws_keys:
-        color = COLORS[(dag, sched)]
-        nodes, _, eff, _ = series(data, dag, sched)
+    for dag in ("large-transformer", "large-wide"):
+        color = COLORS[(dag, "work-stealing")]
+        nodes, _, eff, _ = series(data, dag, "work-stealing")
         ax.plot(nodes, eff, marker="o", linewidth=2, markersize=6,
-                color=color, label=LABELS[(dag, sched)])
+                color=color, label=LABELS[(dag, "work-stealing")])
 
-        # annotate the first node where efficiency drops below 0.7
-        for i, (n, e) in enumerate(zip(nodes, eff)):
-            if e < 0.7:
+        # annotate first point below 0.70
+        for n, e in zip(nodes, eff):
+            if e < 0.70:
                 ax.annotate(
-                    f"eff={e:.2f}\n(n={n})",
-                    xy=(n, e), xytext=(n * 1.1, e + 0.06),
+                    f"eff={e:.2f} (n={n})",
+                    xy=(n, e), xytext=(n + 0.3, e + 0.07),
                     color=color, fontsize=8,
                     arrowprops=dict(arrowstyle="->", color=color, lw=1.0),
                 )
                 break
 
-    ax.axhline(0.7, linestyle="--", linewidth=1.4, color="#ffcc02",
+    ax.axhline(0.70, linestyle="--", linewidth=1.4, color="#ffcc02",
                label="0.70 threshold", alpha=0.85)
 
-    all_nodes = sorted({r["nodes"] for r in data})
     ax.set_xticks(all_nodes)
     ax.set_xticklabels([str(n) for n in all_nodes])
     ax.set_xlabel("Nodes")
     ax.set_ylabel("Parallel Efficiency")
     ax.set_ylim(0, 1.15)
-    ax.set_title("ferroflow Strong Scaling — Parallel Efficiency")
+    ax.set_title("ferroflow Strong Scaling — Parallel Efficiency (WS)")
     ax.legend(framealpha=0.2, labelcolor="white",
               facecolor=DARK_BG, edgecolor=GRID_COL)
 
-    save_fig(fig, DOCS / "scaling_efficiency.png")
+    save_fig(fig, PLOTS / "scaling_efficiency.png")
+
 
 # ---------------------------------------------------------------------------
-# Plot 3 — Steal rate (WS only)
+# Plot 3 — Steal rate (WS only, both DAGs)
 # ---------------------------------------------------------------------------
 def plot_steal_rate(data):
     fig, ax = plt.subplots(figsize=(8, 5))
     fig.patch.set_facecolor(DARK_BG)
     style_ax(ax)
 
-    ws_keys = [k for k in COLORS if k[1] == "work-stealing"]
-
-    all_zero = all(r["steal_rate"] == 0.0 for r in data)
-
-    for (dag, sched) in ws_keys:
-        color = COLORS[(dag, sched)]
-        nodes, _, _, steal = series(data, dag, sched)
-        ax.plot(nodes, steal, marker="o", linewidth=2, markersize=6,
-                color=color, label=LABELS[(dag, sched)])
-
     all_nodes = sorted({r["nodes"] for r in data})
+
+    for dag in ("large-transformer", "large-wide"):
+        color = COLORS[(dag, "work-stealing")]
+        nodes, _, _, steal = series(data, dag, "work-stealing")
+        ax.plot(nodes, steal, marker="o", linewidth=2, markersize=6,
+                color=color, label=LABELS[(dag, "work-stealing")])
+        # label the 8-node value
+        ax.annotate(
+            f"{steal[-1]:.0f}/s",
+            xy=(nodes[-1], steal[-1]),
+            xytext=(nodes[-1] - 0.4, steal[-1] + 25),
+            color=color, fontsize=8,
+        )
+
     ax.set_xticks(all_nodes)
     ax.set_xticklabels([str(n) for n in all_nodes])
     ax.set_xlabel("Nodes")
     ax.set_ylabel("Steals / sec")
-    ax.set_title("ferroflow Steal Rate vs Node Count")
+    ax.set_title("ferroflow Steal Rate vs Node Count (WS)")
     ax.legend(framealpha=0.2, labelcolor="white",
               facecolor=DARK_BG, edgecolor=GRID_COL)
 
-    if all_zero:
-        ax.text(
-            0.5, 0.5,
-            "All steal rates = 0\n(DAGs too small to exhaust worker queues)",
-            transform=ax.transAxes, ha="center", va="center",
-            fontsize=10, color="#aaaaaa", alpha=0.8,
-            bbox=dict(boxstyle="round,pad=0.5", facecolor=DARK_BG,
-                      edgecolor=GRID_COL, alpha=0.7),
-        )
-        ax.set_ylim(-0.1, 1.0)
+    save_fig(fig, PLOTS / "steal_rate.png")
 
-    save_fig(fig, DOCS / "steal_rate.png")
 
 # ---------------------------------------------------------------------------
 
 def main():
     data = load(RESULTS)
     print(f"Loaded {len(data)} records from {RESULTS}")
+    PLOTS.mkdir(parents=True, exist_ok=True)
     plot_throughput(data)
     plot_efficiency(data)
     plot_steal_rate(data)
     print("Done.")
+
 
 if __name__ == "__main__":
     main()

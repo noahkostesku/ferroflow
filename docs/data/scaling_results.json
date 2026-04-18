@@ -1,110 +1,110 @@
 [
-    {
-      "dag": "transformer",
-      "nodes": 2,
-      "scheduler": "static",
-      "throughput": 2234.0,
-      "idle_pct": 8.2,
-      "steal_rate": 0.0,
-      "efficiency": 1.0
-    },
-    {
-      "dag": "transformer",
-      "nodes": 4,
-      "scheduler": "static",
-      "throughput": 2476.0,
-      "idle_pct": 4.0,
-      "steal_rate": 0.0,
-      "efficiency": 0.554
-    },
-    {
-      "dag": "transformer",
-      "nodes": 8,
-      "scheduler": "static",
-      "throughput": 2510.0,
-      "idle_pct": 2.0,
-      "steal_rate": 0.0,
-      "efficiency": 0.281
-    },
-    {
-      "dag": "transformer",
-      "nodes": 2,
-      "scheduler": "work-stealing",
-      "throughput": 1886.0,
-      "idle_pct": 81.0,
-      "steal_rate": 0.0,
-      "efficiency": 1.0
-    },
-    {
-      "dag": "transformer",
-      "nodes": 4,
-      "scheduler": "work-stealing",
-      "throughput": 1549.0,
-      "idle_pct": 31.2,
-      "steal_rate": 0.0,
-      "efficiency": 0.411
-    },
-    {
-      "dag": "transformer",
-      "nodes": 8,
-      "scheduler": "work-stealing",
-      "throughput": 1496.0,
-      "idle_pct": 1.3,
-      "steal_rate": 0.0,
-      "efficiency": 0.198
-    },
-    {
-      "dag": "wide",
-      "nodes": 2,
-      "scheduler": "static",
-      "throughput": 2896.0,
-      "idle_pct": 19.7,
-      "steal_rate": 0.0,
-      "efficiency": 1.0
-    },
-    {
-      "dag": "wide",
-      "nodes": 4,
-      "scheduler": "static",
-      "throughput": 3129.0,
-      "idle_pct": 9.7,
-      "steal_rate": 0.0,
-      "efficiency": 0.54
-    },
-    {
-      "dag": "wide",
-      "nodes": 8,
-      "scheduler": "static",
-      "throughput": 3128.0,
-      "idle_pct": 4.8,
-      "steal_rate": 0.0,
-      "efficiency": 0.27
-    },
-    {
-      "dag": "wide",
-      "nodes": 2,
-      "scheduler": "work-stealing",
-      "throughput": 2877.0,
-      "idle_pct": 80.5,
-      "steal_rate": 0.0,
-      "efficiency": 1.0
-    },
-    {
-      "dag": "wide",
-      "nodes": 4,
-      "scheduler": "work-stealing",
-      "throughput": 3057.0,
-      "idle_pct": 71.0,
-      "steal_rate": 0.0,
-      "efficiency": 0.531
-    },
-    {
-      "dag": "wide",
-      "nodes": 8,
-      "scheduler": "work-stealing",
-      "throughput": 3021.0,
-      "idle_pct": 22.3,
-      "steal_rate": 0.0,
-      "efficiency": 0.263
-    }
-  ]
+  {
+    "dag": "large-transformer",
+    "nodes": 2,
+    "scheduler": "static",
+    "throughput": 559.0,
+    "idle_pct": 75.6,
+    "steal_rate": 0.0,
+    "efficiency": 1.0
+  },
+  {
+    "dag": "large-transformer",
+    "nodes": 4,
+    "scheduler": "static",
+    "throughput": 556.0,
+    "idle_pct": 73.5,
+    "steal_rate": 0.0,
+    "efficiency": 0.497
+  },
+  {
+    "dag": "large-transformer",
+    "nodes": 8,
+    "scheduler": "static",
+    "throughput": 552.0,
+    "idle_pct": 70.4,
+    "steal_rate": 0.0,
+    "efficiency": 0.247
+  },
+  {
+    "dag": "large-transformer",
+    "nodes": 2,
+    "scheduler": "work-stealing",
+    "throughput": 553.0,
+    "idle_pct": 79.0,
+    "steal_rate": 0.0,
+    "efficiency": 1.0
+  },
+  {
+    "dag": "large-transformer",
+    "nodes": 4,
+    "scheduler": "work-stealing",
+    "throughput": 562.0,
+    "idle_pct": 88.2,
+    "steal_rate": 29.2,
+    "efficiency": 0.508
+  },
+  {
+    "dag": "large-transformer",
+    "nodes": 8,
+    "scheduler": "work-stealing",
+    "throughput": 546.0,
+    "idle_pct": 92.8,
+    "steal_rate": 28.4,
+    "efficiency": 0.247
+  },
+  {
+    "dag": "large-wide",
+    "nodes": 2,
+    "scheduler": "static",
+    "throughput": 2702.0,
+    "idle_pct": 0.0,
+    "steal_rate": 0.0,
+    "efficiency": 1.0
+  },
+  {
+    "dag": "large-wide",
+    "nodes": 4,
+    "scheduler": "static",
+    "throughput": 5221.0,
+    "idle_pct": 0.0,
+    "steal_rate": 0.0,
+    "efficiency": 0.966
+  },
+  {
+    "dag": "large-wide",
+    "nodes": 8,
+    "scheduler": "static",
+    "throughput": 10351.0,
+    "idle_pct": 0.0,
+    "steal_rate": 0.0,
+    "efficiency": 0.958
+  },
+  {
+    "dag": "large-wide",
+    "nodes": 2,
+    "scheduler": "work-stealing",
+    "throughput": 2700.0,
+    "idle_pct": 0.9,
+    "steal_rate": 42.2,
+    "efficiency": 1.0
+  },
+  {
+    "dag": "large-wide",
+    "nodes": 4,
+    "scheduler": "work-stealing",
+    "throughput": 5311.0,
+    "idle_pct": 2.3,
+    "steal_rate": 182.6,
+    "efficiency": 0.984
+  },
+  {
+    "dag": "large-wide",
+    "nodes": 8,
+    "scheduler": "work-stealing",
+    "throughput": 10362.0,
+    "idle_pct": 3.4,
+    "steal_rate": 809.5,
+    "efficiency": 0.959
+  }
+]

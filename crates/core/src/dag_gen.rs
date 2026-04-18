@@ -138,6 +138,115 @@ pub fn gen_resnet_block(
     Ok((dag, sources))
 }
 
+/// Generates a stacked multi-layer transformer as a DAG.
+///
+/// Stacks `layers` attention+FFN blocks in sequence.  Each block reuses
+/// the structure of [`gen_transformer_block`]: 5 weight sources (W_Q/K/V/O/FF)
+/// per layer plus 12 compute ops.  Layer 0 also has an explicit input source X.
+/// The final LayerNorm of each layer feeds the next layer's Q/K/V projections.
+///
+/// `layers=8, d_model=512` → 137 ops (18 + 7×17), with 3-way QKV parallelism
+/// inside every block.
+///
+/// # Errors
+/// Returns [`DagError`] if DAG construction fails.
+pub fn gen_large_transformer(
+    layers: usize,
+    d_model: usize,
+) -> Result<(Dag, HashMap<OpId, Tensor>), DagError> {
+    assert!(layers >= 1, "layers must be at least 1");
+    let val = 1.0 / d_model as f32;
+    let m = d_model;
+    let sl = d_model; // seq_len = d_model for simplicity
+    let total_ops = 18 + (layers.saturating_sub(1)) * 17;
+    let mut ops: Vec<Op> = Vec::with_capacity(total_ops);
+    let mut sources: HashMap<OpId, Tensor> = HashMap::new();
+
+    // Layer 0: ops 0-5 are sources (X, W_Q, W_K, W_V, W_O, W_FF), ops 6-17 are compute.
+    for id in 0..6usize {
+        ops.push(Op::new(id, OpKind::Relu { len: m * m }, vec![], vec![m, m]));
+        sources.insert(id, Tensor::full(&[m, m], val));
+    }
+    // Layer 0 compute — identical layout to gen_transformer_block.
+    let prev_ln = build_transformer_compute(&mut ops, 6, 0, sl, m);
+    let _ = prev_ln; // prev_ln == 17 after layer 0
+
+    // Layers 1..layers: 5 fresh weight sources + 12 compute ops per layer.
+    for l in 1..layers {
+        let base = 18 + (l - 1) * 17;
+        let x_id = base - 1; // LayerNorm output of previous layer
+        for w in 0..5usize {
+            let id = base + w;
+            ops.push(Op::new(id, OpKind::Relu { len: m * m }, vec![], vec![m, m]));
+            sources.insert(id, Tensor::full(&[m, m], val));
+        }
+        build_transformer_compute(&mut ops, base + 5, x_id, sl, m);
+    }
+
+    let dag = Dag::new(ops)?;
+    Ok((dag, sources))
+}
+
+/// Appends 12 compute ops for one transformer block starting at `compute_base`.
+///
+/// `x_id` is the op whose output acts as the X (query/key/value input) for this
+/// block.  Weight source ops are assumed to occupy ids
+/// `[compute_base - 5 .. compute_base)` for layers > 0, or `[1..6)` for layer 0.
+/// Returns the id of the final LayerNorm op.
+fn build_transformer_compute(
+    ops: &mut Vec<Op>,
+    compute_base: usize,
+    x_id: usize,
+    sl: usize,
+    m: usize,
+) -> usize {
+    // Determine weight source ids relative to compute_base.
+    let (wq, wk, wv, wo, wff) = if compute_base == 6 {
+        (1, 2, 3, 4, 5)
+    } else {
+        let b = compute_base - 5;
+        (b, b + 1, b + 2, b + 3, b + 4)
+    };
+
+    let cb = compute_base;
+    // Q, K, V projections (3-way parallel fan-out from X)
+    ops.push(Op::new(cb,     OpKind::Matmul { m: sl, n: m, k: m }, vec![x_id, wq], vec![m, m]));
+    ops.push(Op::new(cb + 1, OpKind::Matmul { m: sl, n: m, k: m }, vec![x_id, wk], vec![m, m]));
+    ops.push(Op::new(cb + 2, OpKind::Matmul { m: sl, n: m, k: m }, vec![x_id, wv], vec![m, m]));
+    // Attention scores: Q · K
+    ops.push(Op::new(cb + 3, OpKind::Matmul { m: sl, n: sl, k: m }, vec![cb, cb + 1], vec![m, m]));
+    // Scale (Relu) + softmax approx (LayerNorm)
+    ops.push(Op::new(cb + 4, OpKind::Relu { len: m * m },            vec![cb + 3], vec![m, m]));
+    ops.push(Op::new(cb + 5, OpKind::LayerNorm { len: m * m },       vec![cb + 4], vec![m, m]));
+    // Context: attn_weights · V
+    ops.push(Op::new(cb + 6, OpKind::Matmul { m: sl, n: m, k: m }, vec![cb + 5, cb + 2], vec![m, m]));
+    // Output projection
+    ops.push(Op::new(cb + 7, OpKind::Matmul { m: sl, n: m, k: m }, vec![cb + 6, wo], vec![m, m]));
+    // Residual + layer norm 1
+    ops.push(Op::new(cb + 8, OpKind::Relu { len: m * m },      vec![cb + 7], vec![m, m]));
+    ops.push(Op::new(cb + 9, OpKind::LayerNorm { len: m * m }, vec![cb + 8], vec![m, m]));
+    // Feed-forward + layer norm 2
+    ops.push(Op::new(cb + 10, OpKind::Matmul { m: sl, n: m, k: m }, vec![cb + 9, wff], vec![m, m]));
+    ops.push(Op::new(cb + 11, OpKind::LayerNorm { len: m * m },      vec![cb + 10], vec![m, m]));
+    cb + 11
+}
+
+/// Generates a large wide fan-out DAG with 32 branches × 10 ops (321 total ops).
+///
+/// This is a scaled-up [`gen_wide_dag`]: `width=32`, `depth=10`, `skew_factor=0.5`
+/// (half the branches are 5× slower).  Produces enough parallelism that
+/// work-stealing triggers reliably even at 256 workers.
+///
+/// # Errors
+/// Returns [`DagError`] if DAG construction fails.
+pub fn gen_large_wide(
+    width: usize,
+    depth: usize,
+    skew_factor: f32,
+) -> Result<(Dag, HashMap<OpId, Tensor>), DagError> {
+    gen_wide_dag(width, depth, skew_factor)
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -275,10 +384,56 @@ mod tests {
         let (dag_w, src_w) = gen_wide_dag(4, 3, 0.0).unwrap();
         let (dag_r, src_r) = gen_resnet_block(16).unwrap();
 
-        // Verify topo sort succeeds — full execution tested via scheduler integration tests.
         dag_t.topological_sort().unwrap();
         dag_w.topological_sort().unwrap();
         dag_r.topological_sort().unwrap();
         let _ = (src_t, src_w, src_r);
+    }
+
+    #[test]
+    fn large_transformer_op_count_single_layer() {
+        let (dag, _) = gen_large_transformer(1, 64).unwrap();
+        assert_eq!(dag.len(), 18, "1 layer = 18 ops");
+    }
+
+    #[test]
+    fn large_transformer_op_count_multi_layer() {
+        let (dag, _) = gen_large_transformer(8, 64).unwrap();
+        assert_eq!(dag.len(), 18 + 7 * 17, "8 layers = 137 ops");
+    }
+
+    #[test]
+    fn large_transformer_no_cycle() {
+        let (dag, _) = gen_large_transformer(4, 32).unwrap();
+        assert_no_cycle(&dag);
+    }
+
+    #[test]
+    fn large_transformer_sources_populated() {
+        let (dag, sources) = gen_large_transformer(3, 32).unwrap();
+        // Layer 0: 6 sources. Layers 1-2: 5 each. Total = 16.
+        assert_eq!(sources.len(), 6 + 2 * 5);
+        dag.topological_sort().unwrap();
+    }
+
+    #[test]
+    fn large_wide_op_count() {
+        let (dag, _) = gen_large_wide(32, 10, 0.5).unwrap();
+        assert_eq!(dag.len(), 1 + 32 * 10, "321 ops");
+    }
+
+    #[test]
+    fn large_wide_no_cycle() {
+        let (dag, _) = gen_large_wide(32, 10, 0.5).unwrap();
+        assert_no_cycle(&dag);
+    }
+
+    #[test]
+    fn large_wide_skew_branch_count() {
+        let (dag, _) = gen_large_wide(32, 10, 0.5).unwrap();
+        let n_slow = dag.ops.iter().filter(|op| {
+            matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 5)
+        }).count();
+        assert_eq!(n_slow, 16 * 10, "half branches × 10 ops each");
     }
 }

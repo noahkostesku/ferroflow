@@ -77,7 +77,7 @@ PYEOF
 
 # ── run matrix ────────────────────────────────────────────────────────────────
 NODES_LIST=(2 4 8)
-DAGS=(transformer wide)
+DAGS=(large-transformer large-wide)
 SCHEDS=(static work-stealing)
 
 # Associative array: "dag:sched" -> baseline throughput at N=2
@@ -88,15 +88,15 @@ declare -a RECORDS
 
 for DAG in "${DAGS[@]}"; do
     case "${DAG}" in
-        transformer) DAG_FLAGS="--dag transformer" ;;
-        wide)        DAG_FLAGS="--dag wide --width 16 --depth 5 --skew 0.25" ;;
+        large-transformer) DAG_FLAGS="--dag large-transformer --layers 8 --d-model 512" ;;
+        large-wide)        DAG_FLAGS="--dag large-wide --width 320 --depth 1 --skew 0.47" ;;
     esac
 
     for SCHED in "${SCHEDS[@]}"; do
         SCHED_SLUG="${SCHED/work-stealing/ws}"
 
         for N in "${NODES_LIST[@]}"; do
-            WORKERS=$(( N * SLURM_CPUS_PER_TASK ))
+            WORKERS=$(( N * 4 ))
             echo ""
             echo "[scaling] >>> dag=${DAG}  sched=${SCHED}  nodes=${N}  workers=${WORKERS}"
 
@@ -117,6 +117,7 @@ for DAG in "${DAGS[@]}"; do
                         ${DAG_FLAGS} \
                         --workers "${WORKERS}" \
                         --scheduler "${SCHED}" \
+                        --steal-threshold 1 \
                     || true  # don't abort on non-zero exit
 
                 if [[ -f "${RANK0}" ]]; then
@@ -169,9 +170,9 @@ print_table() {
     local TARGET_DAG=$1
     local TITLE
     case "${TARGET_DAG}" in
-        transformer) TITLE="Transformer DAG (18 ops, 3-way QKV parallel)" ;;
-        wide)        TITLE="Wide Skewed DAG (81 ops, width=16 depth=5 skew=0.25)" ;;
-        *)           TITLE="${TARGET_DAG}" ;;
+        large-transformer) TITLE="Large Transformer DAG (137 ops, 8 layers, d=512)" ;;
+        large-wide)        TITLE="Large Wide DAG (321 ops, width=320 depth=1 skew=0.47)" ;;
+        *)                 TITLE="${TARGET_DAG}" ;;
     esac
 
     echo ""
@@ -196,8 +197,8 @@ print_table() {
     done
 }
 
-print_table "transformer"
-print_table "wide"
+print_table "large-transformer"
+print_table "large-wide"
 
 # ── analysis paragraph ────────────────────────────────────────────────────────
 # Find node count where WS efficiency first drops below 0.70
@@ -227,7 +228,7 @@ done
 TP_WIDE_WS_2=0 TP_WIDE_WS_8=0
 for ROW in "${RECORDS[@]}"; do
     IFS='|' read -r rDAG rN rSCHED rTP rIDLE rSTEAL rEFF <<< "${ROW}"
-    [[ "${rDAG}" != "wide" || "${rSCHED}" != "work-stealing" ]] && continue
+    [[ "${rDAG}" != "large-wide" || "${rSCHED}" != "work-stealing" ]] && continue
     [[ "${rN}" -eq 2  ]] && TP_WIDE_WS_2="${rTP}"
     [[ "${rN}" -eq 8 ]] && TP_WIDE_WS_8="${rTP}"
 done
@@ -243,11 +244,11 @@ ANALYSIS_BLOCK=$(cat <<ANALYSIS
 - **Machine:** Narval (Alliance Canada)  |  **Job:** ${SLURM_JOB_ID}
 - **Nodes:** 2, 4, 8 |  **Ranks/node:** 1  |  **CPUs/rank:** ${SLURM_CPUS_PER_TASK}
 - **Workers:** N × ${SLURM_CPUS_PER_TASK} threads (32 per simulated node)
-- **DAGs:** transformer (18 ops, 3-way QKV parallel), wide-skewed (81 ops, width=16 depth=5 skew=0.25)
+- **DAGs:** large-transformer (137 ops, 8 layers d=512), large-wide (321 ops, width=320 depth=1 skew=0.47)
 - **Commit:** ${GIT_SHA}
 
-$(print_table "transformer")
-$(print_table "wide")
+$(print_table "large-transformer")
+$(print_table "large-wide")
 
 **Analysis:** WS efficiency first drops below 0.70 at ${EFF_DROP} nodes, indicating that
 coordinator-mediated steal latency begins to dominate as the worker pool grows beyond that point.

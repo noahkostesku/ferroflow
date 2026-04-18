@@ -5,8 +5,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use ferroflow_core::{
-    gen_resnet_block, gen_transformer_block, gen_wide_dag, Dag, Op, OpKind, RunMetrics,
-    SchedulerMetrics, Tensor,
+    gen_large_transformer, gen_large_wide, gen_resnet_block, gen_transformer_block, gen_wide_dag,
+    Dag, Op, OpKind, RunMetrics, SchedulerMetrics, Tensor,
 };
 use ferroflow_onnx::{dag_summary, load_model};
 use ferroflow_runtime::{SequentialExecutor, StaticScheduler, WorkStealingScheduler};
@@ -28,6 +28,12 @@ enum SyntheticDag {
     Wide,
     /// ResNet residual block (~8 ops, fork-join pattern).
     Resnet,
+    /// Stacked multi-layer transformer (layers=8, d_model=512 → 137 ops).
+    #[value(name = "large-transformer")]
+    LargeTransformer,
+    /// Large wide fan-out DAG (width=32, depth=10, skew=0.5 → 321 ops).
+    #[value(name = "large-wide")]
+    LargeWide,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -101,6 +107,9 @@ enum Command {
         // ResNet params
         #[arg(long, default_value = "64")]
         channels: usize,
+        // Large-transformer params
+        #[arg(long, default_value = "8")]
+        layers: usize,
     },
 
     /// Execute a DAG with the selected scheduler and print RunMetrics.
@@ -119,6 +128,9 @@ enum Command {
         /// Scheduling strategy.
         #[arg(long, default_value = "work-stealing")]
         scheduler: OnnxScheduler,
+        /// Minimum victim queue depth before work-stealing is allowed (work-stealing only).
+        #[arg(long, default_value = "2")]
+        steal_threshold: usize,
         // Transformer params
         #[arg(long, default_value = "64")]
         seq_len: usize,
@@ -136,6 +148,9 @@ enum Command {
         // ResNet params
         #[arg(long, default_value = "64")]
         channels: usize,
+        // Large-transformer params
+        #[arg(long, default_value = "8")]
+        layers: usize,
     },
 
     /// Run the MPI distributed scheduler across all MPI ranks.
@@ -235,11 +250,14 @@ fn build_synthetic_dag(
     depth: usize,
     skew: f32,
     channels: usize,
+    layers: usize,
 ) -> anyhow::Result<(Arc<Dag>, std::collections::HashMap<usize, Tensor>)> {
     let (dag, src) = match kind {
         SyntheticDag::Transformer => gen_transformer_block(seq_len, d_model, n_heads)?,
         SyntheticDag::Wide => gen_wide_dag(width, depth, skew)?,
         SyntheticDag::Resnet => gen_resnet_block(channels)?,
+        SyntheticDag::LargeTransformer => gen_large_transformer(layers, d_model)?,
+        SyntheticDag::LargeWide => gen_large_wide(width, depth, skew)?,
     };
     Ok((Arc::new(dag), src))
 }
@@ -518,6 +536,7 @@ fn run_info(
     depth: usize,
     skew: f32,
     channels: usize,
+    layers: usize,
 ) -> Result<()> {
     match (model, dag) {
         (Some(path), None) => {
@@ -527,7 +546,7 @@ fn run_info(
         }
         (None, Some(kind)) => {
             let (arc_dag, _) =
-                build_synthetic_dag(kind, seq_len, d_model, n_heads, width, depth, skew, channels)
+                build_synthetic_dag(kind, seq_len, d_model, n_heads, width, depth, skew, channels, layers)
                     .context("building synthetic DAG")?;
             println!("{}", synthetic_dag_summary(&arc_dag));
         }
@@ -541,6 +560,7 @@ async fn run_model(
     dag: Option<&SyntheticDag>,
     workers: usize,
     scheduler: OnnxScheduler,
+    steal_threshold: usize,
     seq_len: usize,
     d_model: usize,
     n_heads: usize,
@@ -548,6 +568,7 @@ async fn run_model(
     depth: usize,
     skew: f32,
     channels: usize,
+    layers: usize,
 ) -> Result<()> {
     let (arc_dag, sources, is_skew, label) = match (model, dag) {
         (Some(path), None) => {
@@ -559,13 +580,15 @@ async fn run_model(
         }
         (None, Some(kind)) => {
             let (arc, s) =
-                build_synthetic_dag(kind, seq_len, d_model, n_heads, width, depth, skew, channels)
+                build_synthetic_dag(kind, seq_len, d_model, n_heads, width, depth, skew, channels, layers)
                     .context("building synthetic DAG")?;
-            let skewed = matches!(kind, SyntheticDag::Wide) && skew > 0.0;
+            let skewed = matches!(kind, SyntheticDag::Wide | SyntheticDag::LargeWide) && skew > 0.0;
             let lbl = match kind {
                 SyntheticDag::Transformer => "transformer".to_string(),
                 SyntheticDag::Wide => format!("wide({}x{},skew={:.2})", width, depth, skew),
                 SyntheticDag::Resnet => "resnet".to_string(),
+                SyntheticDag::LargeTransformer => format!("large-transformer({}L,d={})", layers, d_model),
+                SyntheticDag::LargeWide => format!("large-wide({}x{},skew={:.2})", width, depth, skew),
             };
             println!("{}", synthetic_dag_summary(&arc));
             (arc, s, skewed, lbl)
@@ -590,7 +613,8 @@ async fn run_model(
             ("static", m)
         }
         OnnxScheduler::WorkStealing => {
-            let sched = WorkStealingScheduler::new(workers);
+            let sched = WorkStealingScheduler::new(workers)
+                .with_steal_threshold(steal_threshold);
             let (_, m) = sched
                 .execute(std::sync::Arc::clone(&arc_dag), sources)
                 .await
@@ -638,7 +662,7 @@ async fn main() -> Result<()> {
             print_report(&entries);
         }
 
-        Command::Info { model, dag, seq_len, d_model, n_heads, width, depth, skew, channels } => {
+        Command::Info { model, dag, seq_len, d_model, n_heads, width, depth, skew, channels, layers } => {
             run_info(
                 model.as_ref(),
                 dag.as_ref(),
@@ -649,6 +673,7 @@ async fn main() -> Result<()> {
                 depth,
                 skew,
                 channels,
+                layers,
             )?;
         }
 
@@ -657,6 +682,7 @@ async fn main() -> Result<()> {
             dag,
             workers,
             scheduler,
+            steal_threshold,
             seq_len,
             d_model,
             n_heads,
@@ -664,12 +690,14 @@ async fn main() -> Result<()> {
             depth,
             skew,
             channels,
+            layers,
         } => {
             run_model(
                 model.as_ref(),
                 dag.as_ref(),
                 workers,
                 scheduler,
+                steal_threshold,
                 seq_len,
                 d_model,
                 n_heads,
@@ -677,6 +705,7 @@ async fn main() -> Result<()> {
                 depth,
                 skew,
                 channels,
+                layers,
             )
             .await?;
         }
