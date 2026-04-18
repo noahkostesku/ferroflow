@@ -69,7 +69,7 @@ _Target: 2026-05-11_
 - [x] Synthetic DAG generators: `crates/core/src/dag_gen.rs` — `gen_transformer_block(seq_len, d_model, n_heads)` (18 ops, 3-way QKV parallel), `gen_wide_dag(width, depth, skew_factor)` (width×depth ops, configurable skew), `gen_resnet_block(channels)` (8 ops, fork-join); 12 unit tests; 55/55 tests pass
 - [x] CLI extended: `ferroflow info/run --dag <transformer|wide|resnet>` alongside `--model`; wide supports `--width`, `--depth`, `--skew`; transformer supports `--seq-len`, `--d-model`, `--n-heads`; resnet supports `--channels`
 - [ ] DAG spec file format (JSON or TOML)
-- [ ] README.md with project description, build instructions, benchmark summary
+- [x] README.md with project description, build instructions, benchmark summary
 - [ ] Clean up all `clippy` warnings
 - [ ] Ensure all public APIs have doc comments (`cargo doc --no-deps` clean)
 - [ ] Final 256-node benchmark run on Narval
