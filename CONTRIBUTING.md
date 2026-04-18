@@ -19,8 +19,8 @@ cargo build --features distributed
 ## Running benchmarks locally
 
 ```bash
-ferroflow run --dag imbalanced --workers 8 --scheduler work-stealing
-ferroflow run --dag imbalanced --workers 8 --scheduler static
+./target/release/ferroflow run --dag imbalanced --workers 8 --scheduler work-stealing
+./target/release/ferroflow run --dag imbalanced --workers 8 --scheduler static
 ```
 
 ## Submitting changes
