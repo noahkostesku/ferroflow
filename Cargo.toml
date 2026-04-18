@@ -28,7 +28,13 @@ ferroflow-onnx    = { path = "crates/onnx" }
 name        = "ferroflow"
 version     = "0.1.0"
 edition     = "2021"
-description = "Distributed work-stealing tensor computation scheduler"
+description = "Distributed work-stealing tensor computation scheduler for HPC clusters"
+homepage    = "https://github.com/noahkostesku/ferroflow"
+repository  = "https://github.com/noahkostesku/ferroflow"
+license     = "MIT"
+keywords    = ["hpc", "distributed", "scheduler", "mpi", "rust"]
+categories  = ["science", "concurrency", "algorithms"]
+readme      = "README.md"
 
 [[bin]]
 name = "ferroflow"

@@ -2,7 +2,7 @@
 
 > Check this file at the start of every session to orient on current status.
 
-Last updated: 2026-04-17 (Week 5 Session 3)
+Last updated: 2026-04-17 (Week 6 Session 3)
 
 ---
 
@@ -78,6 +78,16 @@ _Target: 2026-05-11_
 - [x] (Optional) PyO3 bindings: `crates/python` — `DAG` + `run` via `WorkStealingScheduler`; `maturin develop` + `simple_mlp.py` verified
 - [x] (Optional) TUI dashboard: `crates/tui` (`ferroflow-tui`) — `DashboardState`, `WorkerStatus`, four-panel ratatui layout (workers/throughput/steal-activity/summary); `WorkStealingScheduler::execute_with_watch` streams `LiveMetrics` via `tokio::sync::watch` at 100 ms; final `RunMetrics` table printed on completion; `ferroflow-tui --workers <n> --dag-size <n> --skew <n>`; 38/38 tests pass
 - [ ] (Optional) Visualizer: DOT/graphviz output for DAG structure
+
+## Week 6 — Open Source Release Prep
+_Target: 2026-04-17_
+
+- [x] CHANGELOG.md — v0.1.0 entry with full feature list
+- [x] CONTRIBUTING.md — dev setup, MPI build, PR checklist, contribution areas
+- [x] LICENSE — MIT, Copyright 2026 Noah Kostesku
+- [x] Cargo.toml — homepage, repository, license, keywords, categories, readme fields
+- [x] README.md — fix placeholder repo URL, update status line, update license section
+- [x] Tag v0.1.0 and push to GitHub
 
 ---
 
