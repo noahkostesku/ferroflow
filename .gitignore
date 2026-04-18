@@ -26,10 +26,7 @@ slurm/*.err
 # macOS
 .DS_Store
 
-# Personal Claude preferences (never commit)
 CLAUDE.local.md
-
-# Claude Code / agent working directories (session state, skills cache, etc.)
 .claude/
 
 # Cursor: ignore local editor state under `.cursor/`, but allow shared `.cursor/rules/` if present.
@@ -41,3 +38,6 @@ CLAUDE.local.md
 Thumbs.db
 
 CLAUDE.md
+CLAUDE.md
+CLAUDE.local.md
+.claude/

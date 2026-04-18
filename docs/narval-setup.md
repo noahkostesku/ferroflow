@@ -38,38 +38,7 @@ rustup default stable
 
 ---
 
-## 2. Installing Claude Code on the Login Node
-
-Claude Code runs as a Node.js CLI. Alliance login nodes have internet access,
-so a user-space install is straightforward:
-
-```bash
-# Load Node.js (or use a user install)
-module load nodejs
-
-# Install Claude Code globally in user prefix
-npm install -g @anthropic-ai/claude-code
-
-# Verify
-claude --version
-```
-
-If `npm` global installs go to a non-writable path, set a user prefix first:
-```bash
-mkdir -p ~/.npm-global
-npm config set prefix '~/.npm-global'
-export PATH="$HOME/.npm-global/bin:$PATH"   # add to ~/.bashrc
-npm install -g @anthropic-ai/claude-code
-```
-
-Set your API key in `~/.bashrc`:
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-```
-
----
-
-## 3. tmux Workflow for Persistent Sessions
+## 2. tmux Workflow for Persistent Sessions
 
 SSH connections to Narval drop when your local machine sleeps or you lose
 network. Use `tmux` to keep sessions alive across disconnects.
@@ -92,7 +61,7 @@ tmux attach -t ferroflow
 
 ### Suggested tmux layout
 ```
-Window 0: editor / claude code session
+Window 0: editor / code session
 Window 1: cargo build / test output
 Window 2: squeue / job monitoring
 Window 3: $SCRATCH output inspection
@@ -110,7 +79,7 @@ bind r source-file ~/.tmux.conf \; display "Config reloaded"
 
 ---
 
-## 4. Sample sbatch Script — Multi-Node ferroflow Job
+## 3. Sample sbatch Script — Multi-Node ferroflow Job
 
 Save as `slurm/ferroflow.sh`:
 

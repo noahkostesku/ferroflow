@@ -2,7 +2,7 @@
 
 Distributed work-stealing tensor computation scheduler for HPC clusters, written in Rust.
 
-[![CI](https://github.com/noahkostesku/ferroflow/actions/workflows/ci.yml/badge.svg)](https://github.com/noahkostesku/ferroflow/actions/workflows/ci.yml)
+[![CI](https://github.com/noahkostesku/ferroflow/actions/workflows/ci.yml/badge.svg)](https://github.com/noahkostesku/ferroflow/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
