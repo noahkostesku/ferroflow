@@ -30,7 +30,7 @@ _Target: 2026-04-27_
 - [ ] Verify `rsmpi`/MPI environment on Narval (`cargo test -p ferroflow-runtime --features distributed`)
 - [x] MPI worker bridge: `crates/runtime/src/mpi_worker.rs` (rank 0 = coordinator, ranks 1..N = workers; pull-based steal protocol over MPI point-to-point; bincode serialization; shutdown drain)
 - [x] Integration test: 4-op diamond DAG — run with `mpirun -n 2 cargo test -p ferroflow-runtime --features distributed -- --test-threads=1`
-- [x] SLURM script: `slurm/ferroflow.sh` (parameterized, def-cbravo, 30 min, openmpi 5.0.8, appends to benchmarks.md)
+- [x] SLURM script: `slurm/ferroflow.sh` (parameterized, $SLURM_ACCOUNT, 30 min, openmpi 5.0.8, appends to benchmarks.md)
 - [ ] End-to-end run on Narval: `cargo build --release --features distributed && sbatch slurm/ferroflow.sh`
 - [ ] Second run: `sbatch --nodes=4 slurm/ferroflow.sh`
 - [ ] Static scheduler: round-robin op assignment across ranks

@@ -9,10 +9,11 @@
 # Build requirement: cargo build --release --features distributed
 #
 # Usage:
+#   export SLURM_ACCOUNT=def-yourpi
 #   sbatch slurm/benchmark.sh
 #
 #SBATCH --job-name=ferroflow-bench
-#SBATCH --account=def-cbravo
+#SBATCH --account=${SLURM_ACCOUNT}
 #SBATCH --time=01:00:00
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1

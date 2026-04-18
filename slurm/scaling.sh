@@ -6,8 +6,11 @@
 # 3 runs per config, median recorded.  Results appended to scaling_results.json and
 # a summary table + analysis appended to docs/benchmarks.md.
 #
+# Set your Alliance Canada account before submitting:
+#   export SLURM_ACCOUNT=def-yourpi
+#
 #SBATCH --job-name=ferroflow-scaling
-#SBATCH --account=def-cbravo
+#SBATCH --account=${SLURM_ACCOUNT}
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=32
@@ -22,13 +25,14 @@ export LD_LIBRARY_PATH=/cvmfs/soft.computecanada.ca/easybuild/software/2023/x86-
 export RAYON_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
 # ── paths ─────────────────────────────────────────────────────────────────────
-BINARY=/lustre06/project/6040457/noahkost/ferroflow/target/release/ferroflow
-RESULTS=/lustre06/project/6040457/noahkost/ferroflow/docs/scaling_results.json
-BENCHMARKS_MD=/lustre06/project/6040457/noahkost/ferroflow/docs/benchmarks.md
-SUBMIT_DIR=/lustre06/project/6040457/noahkost/ferroflow
+SUBMIT_DIR="${SLURM_SUBMIT_DIR}"
+export CARGO_TARGET_DIR="${SCRATCH}/ferroflow-target"
+BINARY="${CARGO_TARGET_DIR}/release/ferroflow"
+RESULTS="${SUBMIT_DIR}/docs/scaling_results.json"
+BENCHMARKS_MD="${SUBMIT_DIR}/docs/benchmarks.md"
 
 # Per-rank output files land on $SCRATCH (Lustre, shared across nodes)
-STEP_DIR="/lustre06/project/6040457/noahkost/ferroflow/scaling-steps-${SLURM_JOB_ID}"
+STEP_DIR="${SCRATCH}/ferroflow-scaling-steps-${SLURM_JOB_ID}"
 mkdir -p "${STEP_DIR}"
 
 if [[ ! -x "${BINARY}" ]]; then

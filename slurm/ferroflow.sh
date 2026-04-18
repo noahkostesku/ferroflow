@@ -4,8 +4,11 @@
 #   sbatch --nodes=4 slurm/ferroflow.sh
 # Or export FERROFLOW_NODES before calling this wrapper script.
 #
+# Set your Alliance Canada account before submitting:
+#   export SLURM_ACCOUNT=def-yourpi
+#
 #SBATCH --job-name=ferroflow
-#SBATCH --account=def-cbravo
+#SBATCH --account=${SLURM_ACCOUNT}
 #SBATCH --time=00:30:00
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
