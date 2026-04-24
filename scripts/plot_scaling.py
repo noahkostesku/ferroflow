@@ -23,27 +23,27 @@ DARK_BG  = "#1c1c1e"
 GRID_COL = "#3a3a3c"
 
 COLORS = {
-    ("large-transformer", "static"):        "#4fc3f7",
-    ("large-transformer", "work-stealing"): "#0288d1",
-    ("large-wide",        "static"):        "#f48fb1",
-    ("large-wide",        "work-stealing"): "#c2185b",
-    ("imbalanced",        "static"):        "#ffcc80",
-    ("imbalanced",        "work-stealing"): "#e65100",
+    ("xlarge-transformer", "static"):        "#4fc3f7",
+    ("xlarge-transformer", "work-stealing"): "#0288d1",
+    ("xlarge-wide",        "static"):        "#f48fb1",
+    ("xlarge-wide",        "work-stealing"): "#c2185b",
+    ("imbalanced",         "static"):        "#ffcc80",
+    ("imbalanced",         "work-stealing"): "#e65100",
 }
 LABELS = {
-    ("large-transformer", "static"):        "transformer / static",
-    ("large-transformer", "work-stealing"): "transformer / WS",
-    ("large-wide",        "static"):        "large-wide / static",
-    ("large-wide",        "work-stealing"): "large-wide / WS",
-    ("imbalanced",        "static"):        "imbalanced / static",
-    ("imbalanced",        "work-stealing"): "imbalanced / WS",
+    ("xlarge-transformer", "static"):        "xlarge-transformer / static",
+    ("xlarge-transformer", "work-stealing"): "xlarge-transformer / WS",
+    ("xlarge-wide",        "static"):        "xlarge-wide / static",
+    ("xlarge-wide",        "work-stealing"): "xlarge-wide / WS",
+    ("imbalanced",         "static"):        "imbalanced / static",
+    ("imbalanced",         "work-stealing"): "imbalanced / WS",
 }
 DAG_TITLES = {
-    "large-transformer": "Large Transformer\n(137 ops, 8 layers, d=512)",
-    "large-wide":        "Large Wide\n(321 ops, flat fan-out, skew=0.47)",
-    "imbalanced":        "Imbalanced\n(4 heavy×200ms + 200 fast×1ms)",
+    "xlarge-transformer": "XLarge Transformer\n(deep pipeline, sequential bottleneck)",
+    "xlarge-wide":        "XLarge Wide\n(flat fan-out, near-linear scaling)",
+    "imbalanced":         "Imbalanced\n(4 heavy×200ms + 200 fast×1ms)",
 }
-ALL_DAGS = ["large-transformer", "large-wide", "imbalanced"]
+ALL_DAGS = ["xlarge-wide", "xlarge-transformer", "imbalanced"]
 
 
 def load(path):
@@ -144,7 +144,7 @@ def plot_efficiency(data):
     for dag in ALL_DAGS:
         color = COLORS[(dag, "work-stealing")]
         nodes, _, eff, _, _ = series(data, dag, "work-stealing")
-        lw = 2.5 if dag == "large-wide" else 2.0
+        lw = 2.5 if dag == "xlarge-wide" else 2.0
         ax.plot(nodes, eff, marker="o", linewidth=lw, markersize=6,
                 color=color, label=LABELS[(dag, "work-stealing")])
 
@@ -220,7 +220,7 @@ def plot_ws_advantage(data):
         w_nodes, w_tp, _, _, _ = series(data, dag, "work-stealing")
 
         pct = [(w - s) / s * 100 for s, w in zip(s_tp, w_tp)]
-        lw = 2.5 if dag == "imbalanced" else 1.8
+        lw = 2.5 if dag in ("imbalanced", "xlarge-wide") else 1.8
         marker = "D" if dag == "imbalanced" else "o"
         ax.plot(s_nodes, pct, marker=marker, linewidth=lw, markersize=7,
                 color=color, label=LABELS[(dag, "work-stealing")])

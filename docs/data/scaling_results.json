@@ -1,123 +1,123 @@
 [
   {
-    "dag": "large-transformer",
+    "dag": "xlarge-wide",
     "nodes": 2,
     "scheduler": "static",
-    "throughput": 556.0,
-    "stddev": 2.7,
-    "idle_pct": 75.1,
+    "throughput": 7387.0,
+    "stddev": 2.74,
+    "idle_pct": 0.0,
     "steal_rate": 0.0,
     "efficiency": 1.0
   },
   {
-    "dag": "large-transformer",
+    "dag": "xlarge-wide",
     "nodes": 4,
     "scheduler": "static",
-    "throughput": 560.0,
-    "stddev": 2.3,
-    "idle_pct": 73.8,
+    "throughput": 14443.0,
+    "stddev": 10.56,
+    "idle_pct": 0.0,
     "steal_rate": 0.0,
+    "efficiency": 0.978
+  },
+  {
+    "dag": "xlarge-wide",
+    "nodes": 8,
+    "scheduler": "static",
+    "throughput": 27631.0,
+    "stddev": 23.12,
+    "idle_pct": 0.0,
+    "steal_rate": 0.0,
+    "efficiency": 0.935
+  },
+  {
+    "dag": "xlarge-wide",
+    "nodes": 2,
+    "scheduler": "work-stealing",
+    "throughput": 7431.0,
+    "stddev": 2.79,
+    "idle_pct": 0.6,
+    "steal_rate": 34.8,
+    "efficiency": 1.0
+  },
+  {
+    "dag": "xlarge-wide",
+    "nodes": 4,
+    "scheduler": "work-stealing",
+    "throughput": 14777.0,
+    "stddev": 6.98,
+    "idle_pct": 1.0,
+    "steal_rate": 92.4,
+    "efficiency": 0.994
+  },
+  {
+    "dag": "xlarge-wide",
+    "nodes": 8,
+    "scheduler": "work-stealing",
+    "throughput": 28839.0,
+    "stddev": 48.62,
+    "idle_pct": 2.1,
+    "steal_rate": 180.2,
+    "efficiency": 0.97
+  },
+  {
+    "dag": "xlarge-transformer",
+    "nodes": 2,
+    "scheduler": "static",
+    "throughput": 581.0,
+    "stddev": 5.92,
+    "idle_pct": 78.0,
+    "steal_rate": 0.0,
+    "efficiency": 1.0
+  },
+  {
+    "dag": "xlarge-transformer",
+    "nodes": 4,
+    "scheduler": "static",
+    "throughput": 581.0,
+    "stddev": 2.12,
+    "idle_pct": 83.7,
+    "steal_rate": 0.0,
+    "efficiency": 0.5
+  },
+  {
+    "dag": "xlarge-transformer",
+    "nodes": 8,
+    "scheduler": "static",
+    "throughput": 578.0,
+    "stddev": 2.74,
+    "idle_pct": 86.5,
+    "steal_rate": 0.0,
+    "efficiency": 0.249
+  },
+  {
+    "dag": "xlarge-transformer",
+    "nodes": 2,
+    "scheduler": "work-stealing",
+    "throughput": 578.0,
+    "stddev": 5.15,
+    "idle_pct": 79.1,
+    "steal_rate": 0.0,
+    "efficiency": 1.0
+  },
+  {
+    "dag": "xlarge-transformer",
+    "nodes": 4,
+    "scheduler": "work-stealing",
+    "throughput": 583.0,
+    "stddev": 3.05,
+    "idle_pct": 87.7,
+    "steal_rate": 7.6,
     "efficiency": 0.504
   },
   {
-    "dag": "large-transformer",
+    "dag": "xlarge-transformer",
     "nodes": 8,
-    "scheduler": "static",
-    "throughput": 552.0,
-    "stddev": 4.66,
-    "idle_pct": 70.3,
-    "steal_rate": 0.0,
+    "scheduler": "work-stealing",
+    "throughput": 574.0,
+    "stddev": 3.83,
+    "idle_pct": 92.3,
+    "steal_rate": 7.5,
     "efficiency": 0.248
-  },
-  {
-    "dag": "large-transformer",
-    "nodes": 2,
-    "scheduler": "work-stealing",
-    "throughput": 556.0,
-    "stddev": 2.12,
-    "idle_pct": 78.7,
-    "steal_rate": 0.0,
-    "efficiency": 1.0
-  },
-  {
-    "dag": "large-transformer",
-    "nodes": 4,
-    "scheduler": "work-stealing",
-    "throughput": 557.0,
-    "stddev": 3.71,
-    "idle_pct": 87.5,
-    "steal_rate": 34.5,
-    "efficiency": 0.501
-  },
-  {
-    "dag": "large-transformer",
-    "nodes": 8,
-    "scheduler": "work-stealing",
-    "throughput": 543.0,
-    "stddev": 3.27,
-    "idle_pct": 91.6,
-    "steal_rate": 28.3,
-    "efficiency": 0.244
-  },
-  {
-    "dag": "large-wide",
-    "nodes": 2,
-    "scheduler": "static",
-    "throughput": 2701.0,
-    "stddev": 0.45,
-    "idle_pct": 0.0,
-    "steal_rate": 0.0,
-    "efficiency": 1.0
-  },
-  {
-    "dag": "large-wide",
-    "nodes": 4,
-    "scheduler": "static",
-    "throughput": 5219.0,
-    "stddev": 2.61,
-    "idle_pct": 0.0,
-    "steal_rate": 0.0,
-    "efficiency": 0.966
-  },
-  {
-    "dag": "large-wide",
-    "nodes": 8,
-    "scheduler": "static",
-    "throughput": 10359.0,
-    "stddev": 14.29,
-    "idle_pct": 0.0,
-    "steal_rate": 0.0,
-    "efficiency": 0.959
-  },
-  {
-    "dag": "large-wide",
-    "nodes": 2,
-    "scheduler": "work-stealing",
-    "throughput": 2700.0,
-    "stddev": 0.84,
-    "idle_pct": 0.9,
-    "steal_rate": 42.2,
-    "efficiency": 1.0
-  },
-  {
-    "dag": "large-wide",
-    "nodes": 4,
-    "scheduler": "work-stealing",
-    "throughput": 5310.0,
-    "stddev": 1.79,
-    "idle_pct": 2.3,
-    "steal_rate": 182.5,
-    "efficiency": 0.983
-  },
-  {
-    "dag": "large-wide",
-    "nodes": 8,
-    "scheduler": "work-stealing",
-    "throughput": 10364.0,
-    "stddev": 10.69,
-    "idle_pct": 3.4,
-    "steal_rate": 808.1,
-    "efficiency": 0.96
   },
   {
     "dag": "imbalanced",
@@ -133,18 +133,18 @@
     "dag": "imbalanced",
     "nodes": 4,
     "scheduler": "static",
-    "throughput": 959.0,
+    "throughput": 958.0,
     "stddev": 0.55,
     "idle_pct": 0.0,
     "steal_rate": 0.0,
-    "efficiency": 0.533
+    "efficiency": 0.532
   },
   {
     "dag": "imbalanced",
     "nodes": 8,
     "scheduler": "static",
     "throughput": 988.0,
-    "stddev": 0.55,
+    "stddev": 0.0,
     "idle_pct": 0.0,
     "steal_rate": 0.0,
     "efficiency": 0.274
@@ -154,7 +154,7 @@
     "nodes": 2,
     "scheduler": "work-stealing",
     "throughput": 1014.0,
-    "stddev": 0.45,
+    "stddev": 0.55,
     "idle_pct": 37.1,
     "steal_rate": 477.0,
     "efficiency": 1.0
@@ -164,16 +164,16 @@
     "nodes": 4,
     "scheduler": "work-stealing",
     "throughput": 1013.0,
-    "stddev": 0.0,
+    "stddev": 0.45,
     "idle_pct": 68.5,
-    "steal_rate": 218.5,
+    "steal_rate": 218.6,
     "efficiency": 0.5
   },
   {
     "dag": "imbalanced",
     "nodes": 8,
     "scheduler": "work-stealing",
-    "throughput": 1013.0,
+    "throughput": 1012.0,
     "stddev": 0.55,
     "idle_pct": 84.0,
     "steal_rate": 99.3,

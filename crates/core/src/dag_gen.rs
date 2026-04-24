@@ -394,6 +394,43 @@ pub fn gen_large_wide(
     gen_wide_dag(width, depth, skew_factor)
 }
 
+/// Generates an extra-large wide fan-out DAG for work-stealing validation at scale.
+///
+/// Identical structure to [`gen_wide_dag`] but sized to exhaust worker queues mid-execution.
+/// `width=64, depth=10` → 641 ops; `width=128, depth=8` → 1025 ops.
+///
+/// `skew_factor` is the fraction of branches (rounded) that receive 5× slower ops,
+/// creating the imbalance that forces work-stealing to trigger.
+///
+/// # Errors
+/// Returns [`DagError`] if DAG construction fails.
+pub fn gen_xlarge_wide(
+    width: usize,
+    depth: usize,
+    skew_factor: f32,
+) -> Result<(Dag, HashMap<OpId, Tensor>), DagError> {
+    gen_wide_dag(width, depth, skew_factor)
+}
+
+/// Generates an extra-large stacked transformer DAG for work-stealing validation at scale.
+///
+/// Identical block structure to [`gen_large_transformer`]: 3-way QKV parallelism per layer,
+/// sequential attention→FFN chain within each block.  `layers=32, d_model=512` → 545 ops
+/// (`18 + 31 × 17`), large enough that 8 workers run dry mid-execution and steal.
+///
+/// `n_heads` informs the logical attention shape but does not change the op graph structure
+/// (all tensors use square `d_model × d_model` shapes, consistent with [`gen_transformer_block`]).
+///
+/// # Errors
+/// Returns [`DagError`] if DAG construction fails.
+pub fn gen_xlarge_transformer(
+    layers: usize,
+    d_model: usize,
+    _n_heads: usize,
+) -> Result<(Dag, HashMap<OpId, Tensor>), DagError> {
+    gen_large_transformer(layers, d_model)
+}
+
 /// Generates an imbalanced DAG that provably concentrates slow work on specific workers
 /// under static round-robin scheduling, exposing the work-stealing advantage.
 ///
@@ -643,6 +680,51 @@ mod tests {
             .filter(|op| matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 5))
             .count();
         assert_eq!(n_slow, 16 * 10, "half branches × 10 ops each");
+    }
+
+    #[test]
+    fn xlarge_wide_op_count() {
+        let (dag, sources) = gen_xlarge_wide(64, 10, 0.5).unwrap();
+        assert_eq!(dag.len(), 1 + 64 * 10, "641 ops");
+        assert_eq!(sources.len(), 1);
+    }
+
+    #[test]
+    fn xlarge_wide_no_cycle() {
+        let (dag, _) = gen_xlarge_wide(64, 10, 0.5).unwrap();
+        assert_no_cycle(&dag);
+    }
+
+    #[test]
+    fn xlarge_wide_skew_branch_count() {
+        let (dag, _) = gen_xlarge_wide(64, 10, 0.5).unwrap();
+        let n_slow = dag
+            .ops
+            .iter()
+            .filter(|op| matches!(op.kind, OpKind::Slow { duration_ms } if duration_ms == 5))
+            .count();
+        assert_eq!(n_slow, 32 * 10, "half of 64 branches × 10 ops each");
+    }
+
+    #[test]
+    fn xlarge_transformer_op_count() {
+        // 18 + (32 - 1) * 17 = 545
+        let (dag, _) = gen_xlarge_transformer(32, 64, 8).unwrap();
+        assert_eq!(dag.len(), 18 + 31 * 17, "545 ops for 32 layers");
+    }
+
+    #[test]
+    fn xlarge_transformer_no_cycle() {
+        let (dag, _) = gen_xlarge_transformer(4, 32, 4).unwrap();
+        assert_no_cycle(&dag);
+    }
+
+    #[test]
+    fn xlarge_transformer_sources_populated() {
+        let (dag, sources) = gen_xlarge_transformer(3, 32, 4).unwrap();
+        // Layer 0: 6 sources. Layers 1-2: 5 each. Total = 16.
+        assert_eq!(sources.len(), 6 + 2 * 5);
+        dag.topological_sort().unwrap();
     }
 
     #[test]

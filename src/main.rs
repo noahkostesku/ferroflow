@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use ferroflow_core::{
     gen_imbalanced, gen_large_transformer, gen_large_wide, gen_resnet_block, gen_transformer_block,
-    gen_wide_dag, Dag, Op, OpKind, RunMetrics, SchedulerMetrics, Tensor,
+    gen_wide_dag, gen_xlarge_transformer, gen_xlarge_wide, Dag, Op, OpKind, RunMetrics,
+    SchedulerMetrics, Tensor,
 };
 use ferroflow_onnx::{dag_summary, load_model};
 use ferroflow_runtime::{SequentialExecutor, StaticScheduler, WorkStealingScheduler};
@@ -36,6 +37,12 @@ enum SyntheticDag {
     LargeWide,
     /// Imbalanced DAG: sequential slow chains + independent fast ops (exposes WS advantage over static).
     Imbalanced,
+    /// Extra-large wide fan-out DAG (≥641 ops at width=64 depth=10 skew=0.5).
+    #[value(name = "xlarge-wide")]
+    XlargeWide,
+    /// Extra-large stacked transformer (≥545 ops at layers=32 d_model=512 n_heads=8).
+    #[value(name = "xlarge-transformer")]
+    XlargeTransformer,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -311,6 +318,8 @@ fn build_synthetic_dag(
         SyntheticDag::Imbalanced => {
             gen_imbalanced(p.n_long_chains, p.chain_depth, p.n_short_ops, p.slow_factor)?
         }
+        SyntheticDag::XlargeWide => gen_xlarge_wide(p.width, p.depth, p.skew)?,
+        SyntheticDag::XlargeTransformer => gen_xlarge_transformer(p.layers, p.d_model, p.n_heads)?,
     };
     Ok((Arc::new(dag), src))
 }
@@ -636,7 +645,10 @@ async fn run_model(
             let (arc, s) = build_synthetic_dag(kind, p).context("building synthetic DAG")?;
             let skewed = matches!(
                 kind,
-                SyntheticDag::Wide | SyntheticDag::LargeWide | SyntheticDag::Imbalanced
+                SyntheticDag::Wide
+                    | SyntheticDag::LargeWide
+                    | SyntheticDag::XlargeWide
+                    | SyntheticDag::Imbalanced
             );
             let lbl = match kind {
                 SyntheticDag::Transformer => "transformer".to_string(),
@@ -654,6 +666,12 @@ async fn run_model(
                     p.chain_depth as u64 * p.slow_factor,
                     p.n_short_ops
                 ),
+                SyntheticDag::XlargeWide => {
+                    format!("xlarge-wide({}x{},skew={:.2})", p.width, p.depth, p.skew)
+                }
+                SyntheticDag::XlargeTransformer => {
+                    format!("xlarge-transformer({}L,d={},h={})", p.layers, p.d_model, p.n_heads)
+                }
             };
             println!("{}", synthetic_dag_summary(&arc));
             (arc, s, skewed, lbl)

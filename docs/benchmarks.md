@@ -201,12 +201,64 @@ _Full multi-node scaling results (4 / 8 / 16 / 32 nodes) pending Narval runs._
 |     4 |             3129 |             3057 |         0.531 |      0.0/s |
 |     8 |             3128 |             3021 |         0.263 |      0.0/s |
 
-The work-stealing scheduler showed lower throughput than static across all 
-configurations, with steal rate of 0/s in all runs. This indicates that 
-with 32 threads per worker and DAGs of 18-81 ops, no worker queue ran dry 
-during execution — the steal threshold was never triggered. The efficiency 
-degradation in work-stealing vs static reflects coordination overhead 
-without the compensating benefit of load rebalancing. This suggests the 
-current DAG sizes are too small relative to worker count to demonstrate 
-work-stealing benefits at this scale. Larger DAGs (500+ ops) or reduced 
-thread counts would create the queue exhaustion needed to trigger stealing.
+### 2026-04-17 — Strong Scaling Study (Week 5 Session 2, job 59544118)
+
+### Strong Scaling — Large Transformer DAG (137 ops, 8 layers, d=512)
+
+| Nodes |   Static (ops/s) |       WS (ops/s) | WS Efficiency | Steal Rate |
+|-------||-----------------||-----------------||---------------||------------||
+|     2 |              556 |              556 |         1.000 |      0.0/s |
+|     4 |              560 |              557 |         0.501 |     34.5/s |
+|     8 |              552 |              543 |         0.244 |     28.3/s |
+
+### Strong Scaling — Large Wide DAG (321 ops, width=320 depth=1 skew=0.47)
+
+| Nodes |   Static (ops/s) |       WS (ops/s) | WS Efficiency | Steal Rate |
+|-------||-----------------||-----------------||---------------||------------||
+|     2 |             2701 |             2700 |         1.000 |     42.2/s |
+|     4 |             5219 |             5310 |         0.983 |    182.5/s |
+|     8 |            10359 |            10364 |         0.960 |    808.1/s |
+
+### Strong Scaling — Imbalanced DAG (205 ops, 4 heavy ops × 200ms + 200 fast ops × 1ms)
+
+| Nodes |   Static (ops/s) |       WS (ops/s) | WS Efficiency | Steal Rate |
+|-------||-----------------||-----------------||---------------||------------||
+|     2 |              900 |             1014 |         1.000 |    477.0/s |
+|     4 |              959 |             1013 |         0.500 |    218.5/s |
+|     8 |              988 |             1013 |         0.250 |     99.3/s |
+
+
+---
+
+### 2026-04-24 — Strong Scaling Study (Week 5 Session 2, job 59826638)
+
+- **Machine:** Narval (Alliance Canada)  |  **Job:** 59826638
+- **Nodes:** 2, 4, 8 |  **Ranks/node:** 1  |  **CPUs/rank:** 32
+- **Workers:** N × 32 threads (32 per simulated node)
+- **DAGs:** xlarge-wide (1281 ops, width=1280 depth=1 skew=0.003), xlarge-transformer (545 ops, 32 layers d=512 n_heads=8), imbalanced (205 ops, 4 heavy ops × 200ms + 200 fast ops × 1ms)
+- **Commit:** 3709ffc
+
+
+### Strong Scaling — XLarge Wide DAG (1281 ops, width=1280 depth=1 skew=0.003)
+
+| Nodes |   Static (ops/s) |       WS (ops/s) | WS Efficiency | Steal Rate |
+|-------||-----------------||-----------------||---------------||------------||
+|     2 |             7387 |             7431 |         1.000 |     34.8/s |
+|     4 |            14443 |            14777 |         0.994 |     92.4/s |
+|     8 |            27631 |            28839 |         0.970 |    180.2/s |
+
+### Strong Scaling — XLarge Transformer DAG (545 ops, 32 layers, d=512, n_heads=8)
+
+| Nodes |   Static (ops/s) |       WS (ops/s) | WS Efficiency | Steal Rate |
+|-------||-----------------||-----------------||---------------||------------||
+|     2 |              581 |              578 |         1.000 |      0.0/s |
+|     4 |              581 |              583 |         0.504 |      7.6/s |
+|     8 |              578 |              574 |         0.248 |      7.5/s |
+
+### Strong Scaling — Imbalanced DAG (205 ops, 4 heavy ops × 200ms + 200 fast ops × 1ms)
+
+| Nodes |   Static (ops/s) |       WS (ops/s) | WS Efficiency | Steal Rate |
+|-------||-----------------||-----------------||---------------||------------||
+|     2 |              900 |             1014 |         1.000 |    477.0/s |
+|     4 |              958 |             1013 |         0.500 |    218.6/s |
+|     8 |              988 |             1012 |         0.250 |     99.3/s |
