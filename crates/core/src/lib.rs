@@ -8,7 +8,7 @@ pub mod tensor;
 pub use dag::{Dag, DagError};
 pub use dag_gen::{
     gen_imbalanced, gen_large_transformer, gen_large_wide, gen_resnet_block, gen_transformer_block,
-    gen_wide_dag,
+    gen_wide_dag, gen_xlarge_transformer, gen_xlarge_wide,
 };
 pub use metrics::{
     LiveMetrics, RunMetrics, SchedulerMetrics, WorkerLiveSnapshot, WorkerLiveStatus,

@@ -10,7 +10,7 @@
 #   export SLURM_ACCOUNT=def-yourpi
 #
 #SBATCH --job-name=ferroflow-scaling
-#SBATCH --account=${SLURM_ACCOUNT}
+#SBATCH --account=def-cbravo
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=32
@@ -26,13 +26,14 @@ export RAYON_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
 # ── paths ─────────────────────────────────────────────────────────────────────
 SUBMIT_DIR="${SLURM_SUBMIT_DIR}"
-export CARGO_TARGET_DIR="${SCRATCH}/ferroflow-target"
-BINARY="${CARGO_TARGET_DIR}/release/ferroflow"
+# export CARGO_TARGET_DIR="${SCRATCH}/ferroflow-target"
+# BINARY="${CARGO_TARGET_DIR}/release/ferroflow"
+BINARY=/lustre06/project/6040457/noahkost/ferroflow/target/release/ferroflow
 RESULTS="${SUBMIT_DIR}/docs/scaling_results.json"
 BENCHMARKS_MD="${SUBMIT_DIR}/docs/benchmarks.md"
 
 # Per-rank output files land on $SCRATCH (Lustre, shared across nodes)
-STEP_DIR="${SCRATCH}/ferroflow-scaling-steps-${SLURM_JOB_ID}"
+STEP_DIR=/lustre06/project/6040457/noahkost/ferroflow/scaling-steps-${SLURM_JOB_ID}
 mkdir -p "${STEP_DIR}"
 
 if [[ ! -x "${BINARY}" ]]; then
@@ -86,7 +87,7 @@ PYEOF
 
 # ── run matrix ────────────────────────────────────────────────────────────────
 NODES_LIST=(2 4 8)
-DAGS=(large-transformer large-wide imbalanced)
+DAGS=(xlarge-wide xlarge-transformer imbalanced)
 SCHEDS=(static work-stealing)
 
 # Associative array: "dag:sched" -> baseline throughput at N=2
@@ -97,9 +98,9 @@ declare -a RECORDS
 
 for DAG in "${DAGS[@]}"; do
     case "${DAG}" in
-        large-transformer) DAG_FLAGS="--dag large-transformer --layers 8 --d-model 512" ;;
-        large-wide)        DAG_FLAGS="--dag large-wide --width 320 --depth 1 --skew 0.47" ;;
-        imbalanced)        DAG_FLAGS="--dag imbalanced --n-long-chains 4 --chain-depth 20 --n-short-ops 200 --slow-factor 10" ;;
+        xlarge-wide)        DAG_FLAGS="--dag xlarge-wide --width 1280 --depth 1 --skew 0.003" ;;
+        xlarge-transformer) DAG_FLAGS="--dag xlarge-transformer --layers 32 --d-model 512 --n-heads 8" ;;
+        imbalanced)         DAG_FLAGS="--dag imbalanced --n-long-chains 4 --chain-depth 20 --n-short-ops 200 --slow-factor 10" ;;
     esac
 
     for SCHED in "${SCHEDS[@]}"; do
@@ -180,10 +181,10 @@ print_table() {
     local TARGET_DAG=$1
     local TITLE
     case "${TARGET_DAG}" in
-        large-transformer) TITLE="Large Transformer DAG (137 ops, 8 layers, d=512)" ;;
-        large-wide)        TITLE="Large Wide DAG (321 ops, width=320 depth=1 skew=0.47)" ;;
-        imbalanced)        TITLE="Imbalanced DAG (205 ops, 4 heavy ops × 200ms + 200 fast ops × 1ms)" ;;
-        *)                 TITLE="${TARGET_DAG}" ;;
+        xlarge-wide)        TITLE="XLarge Wide DAG (1281 ops, width=1280 depth=1 skew=0.003)" ;;
+        xlarge-transformer) TITLE="XLarge Transformer DAG (545 ops, 32 layers, d=512, n_heads=8)" ;;
+        imbalanced)         TITLE="Imbalanced DAG (205 ops, 4 heavy ops × 200ms + 200 fast ops × 1ms)" ;;
+        *)                  TITLE="${TARGET_DAG}" ;;
     esac
 
     echo ""
@@ -208,8 +209,8 @@ print_table() {
     done
 }
 
-print_table "large-transformer"
-print_table "large-wide"
+print_table "xlarge-wide"
+print_table "xlarge-transformer"
 print_table "imbalanced"
 
 # ── analysis paragraph ────────────────────────────────────────────────────────
@@ -236,11 +237,11 @@ for ROW in "${RECORDS[@]}"; do
     fi
 done
 
-# WS speedup on wide-skewed at 8 nodes vs 2 nodes
+# WS speedup on xlarge-wide at 8 nodes vs 2 nodes
 TP_WIDE_WS_2=0 TP_WIDE_WS_8=0
 for ROW in "${RECORDS[@]}"; do
     IFS='|' read -r rDAG rN rSCHED rTP rIDLE rSTEAL rEFF <<< "${ROW}"
-    [[ "${rDAG}" != "large-wide" || "${rSCHED}" != "work-stealing" ]] && continue
+    [[ "${rDAG}" != "xlarge-wide" || "${rSCHED}" != "work-stealing" ]] && continue
     [[ "${rN}" -eq 2  ]] && TP_WIDE_WS_2="${rTP}"
     [[ "${rN}" -eq 8 ]] && TP_WIDE_WS_8="${rTP}"
 done
@@ -256,11 +257,11 @@ ANALYSIS_BLOCK=$(cat <<ANALYSIS
 - **Machine:** Narval (Alliance Canada)  |  **Job:** ${SLURM_JOB_ID}
 - **Nodes:** 2, 4, 8 |  **Ranks/node:** 1  |  **CPUs/rank:** ${SLURM_CPUS_PER_TASK}
 - **Workers:** N × ${SLURM_CPUS_PER_TASK} threads (32 per simulated node)
-- **DAGs:** large-transformer (137 ops, 8 layers d=512), large-wide (321 ops, width=320 depth=1 skew=0.47), imbalanced (205 ops, 4 heavy ops × 200ms + 200 fast ops × 1ms)
+- **DAGs:** xlarge-wide (1281 ops, width=1280 depth=1 skew=0.003), xlarge-transformer (545 ops, 32 layers d=512 n_heads=8), imbalanced (205 ops, 4 heavy ops × 200ms + 200 fast ops × 1ms)
 - **Commit:** ${GIT_SHA}
 
-$(print_table "large-transformer")
-$(print_table "large-wide")
+$(print_table "xlarge-wide")
+$(print_table "xlarge-transformer")
 $(print_table "imbalanced")
 
 **Analysis:** WS efficiency first drops below 0.70 at ${EFF_DROP} nodes, indicating that

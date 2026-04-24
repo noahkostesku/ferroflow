@@ -12,14 +12,14 @@ Static scheduling concentrates slow ops on specific workers, leaving others idle
 
 ## Results
 
-| Workload | Nodes | Static | ferroflow | Advantage |
+| Workload | Nodes | Static | ferroflow WS | Advantage |
 |---|---|---|---|---|
 | Imbalanced DAG | 2 | 900 ops/s | 1,014 ops/s | +12.7% |
-| Imbalanced DAG | 8 | 988 ops/s | 1,013 ops/s | +2.5% |
-| Parallel DAG | 8 | 10,359 ops/s | 10,364 ops/s | 96% efficiency |
-| Transformer DAG | 8 | ~550 ops/s | ~550 ops/s | DAG-bounded |
+| XLarge Wide DAG | 8 | 27,631 ops/s | 28,839 ops/s | +4.4% |
+| XLarge Wide DAG | 8 | — | 28,839 ops/s | 97% efficiency |
+| Transformer DAG | 8 | ~580 ops/s | ~580 ops/s | DAG-bounded |
 
-Narval supercomputer (Alliance Canada), AMD EPYC Milan, 100Gb/s interconnect. 5-run medians.
+Narval supercomputer (Alliance Canada), AMD EPYC Milan, 100Gb/s interconnect. 5-run medians. job 59826638.
 
 ---
 
@@ -87,8 +87,35 @@ python scripts/export_mlp.py
 
 ![Throughput scaling](docs/plots/scaling_throughput.png)
 ![Parallel efficiency](docs/plots/scaling_efficiency.png)
+![Steal rate](docs/plots/steal_rate.png)
 
-The work-stealing scheduler showed lower throughput than static across all configurations, with steal rate of 0/s in all runs. This indicates that with 32 threads per worker and DAGs of 18–81 ops, no worker queue ran dry during execution — the steal threshold was never triggered. The efficiency degradation in work-stealing vs static reflects coordination overhead without the compensating benefit of load rebalancing. This suggests the current DAG sizes are too small relative to worker count to demonstrate work-stealing benefits at this scale. Larger DAGs (500+ ops) or reduced thread counts would create the queue exhaustion needed to trigger stealing.
+Narval, job 59826638. Commit 3709ffc.
+
+### XLarge Wide DAG (1281 ops, width=1280 depth=1 skew=0.003)
+
+| Nodes | Static (ops/s) | WS (ops/s) | WS Efficiency | Steal Rate |
+|-------|----------------|------------|---------------|------------|
+| 2 | 7,387 | 7,431 | 1.000 | 34.8/s |
+| 4 | 14,443 | 14,777 | 0.994 | 92.4/s |
+| 8 | 27,631 | 28,839 | 0.970 | 180.2/s |
+
+### XLarge Transformer DAG (545 ops, 32 layers, d=512)
+
+| Nodes | Static (ops/s) | WS (ops/s) | WS Efficiency | Steal Rate |
+|-------|----------------|------------|---------------|------------|
+| 2 | 581 | 578 | 1.000 | 0.0/s |
+| 4 | 581 | 583 | 0.504 | 7.6/s |
+| 8 | 578 | 574 | 0.248 | 7.5/s |
+
+### Imbalanced DAG (205 ops, 4 heavy×200ms + 200 fast×1ms)
+
+| Nodes | Static (ops/s) | WS (ops/s) | WS Efficiency | Steal Rate |
+|-------|----------------|------------|---------------|------------|
+| 2 | 900 | 1,014 | 1.000 | 477.0/s |
+| 4 | 958 | 1,013 | 0.500 | 218.6/s |
+| 8 | 988 | 1,012 | 0.250 | 99.3/s |
+
+On parallel skewed workloads (xlarge-wide, 1281 ops), work-stealing maintains 97% parallel efficiency at 8 nodes with steal rate scaling from 34/s at 2 nodes to 180/s at 8 nodes, outperforming static at every node count. On imbalanced workloads where round-robin concentrates slow chains on specific workers, work-stealing recovers dynamically with 477 steals/sec and 12.7% higher throughput than static at 2 nodes. Serial dependency chains (transformer DAG) plateau at ~580 ops/s regardless of scheduler or node count, correctly identifying DAG depth as the throughput ceiling.
 
 ---
 
