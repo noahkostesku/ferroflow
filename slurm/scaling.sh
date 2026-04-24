@@ -28,12 +28,12 @@ export RAYON_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 SUBMIT_DIR="${SLURM_SUBMIT_DIR}"
 # export CARGO_TARGET_DIR="${SCRATCH}/ferroflow-target"
 # BINARY="${CARGO_TARGET_DIR}/release/ferroflow"
-BINARY=/lustre06/project/6040457/noahkost/ferroflow/target/release/ferroflow
+BINARY=${CARGO_TARGET_DIR}/release/ferroflow
 RESULTS="${SUBMIT_DIR}/docs/scaling_results.json"
 BENCHMARKS_MD="${SUBMIT_DIR}/docs/benchmarks.md"
 
 # Per-rank output files land on $SCRATCH (Lustre, shared across nodes)
-STEP_DIR=/lustre06/project/6040457/noahkost/ferroflow/scaling-steps-${SLURM_JOB_ID}
+STEP_DIR=${SLURM_SUBMIT_DIR}/scaling-steps-${SLURM_JOB_ID}
 mkdir -p "${STEP_DIR}"
 
 if [[ ! -x "${BINARY}" ]]; then
