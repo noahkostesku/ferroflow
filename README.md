@@ -71,7 +71,20 @@ cargo build --release
 
 ## ONNX support
 
-Supported ops: `MatMul`, `Gemm`, `Relu`, `LayerNormalization`, `ReduceMean`, `GlobalAveragePool`
+| ONNX Op | ferroflow OpKind | Status |
+|---|---|---|
+| MatMul | Matmul | ✓ |
+| Gemm | Matmul | ✓ |
+| Relu | Relu | ✓ |
+| LayerNormalization | LayerNorm | ✓ |
+| ReduceMean | Reduce | ✓ |
+| GlobalAveragePool | Reduce | ✓ |
+| Softmax | Softmax | ✓ |
+| BatchNormalization | BatchNorm | ✓ |
+| Conv | Conv2d | ✓ |
+| MaxPool | — | planned |
+| Add | — | planned |
+| Flatten | — | planned |
 
 ```bash
 # Export from PyTorch

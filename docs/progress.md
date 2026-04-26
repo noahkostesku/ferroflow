@@ -2,7 +2,7 @@
 
 > Check this file at the start of every session to orient on current status.
 
-Last updated: 2026-04-18 (Week 6 Session 2)
+Last updated: 2026-04-24 (Week 7 Session 1)
 
 ---
 
@@ -106,4 +106,5 @@ _Target: 2026-04-17_
 - **2026-04-17:** Week 5 Session 2. `slurm/scaling.sh` — strong scaling harness (2/4/8/16 nodes, transformer+wide-skew, static+WS, 3 runs/config, median). srun per-rank output to $SCRATCH. JSON append, comparison tables, analysis paragraph auto-generated. Ready to rsync and sbatch.
 - **2026-04-17:** Week 5 Session 1. Synthetic DAG generators in `crates/core/src/dag_gen.rs`. Local scaling preview (release build, 4 workers): transformer WS=2.5 ms vs static=2.6 ms vs seq=3.3 ms; resnet WS=0.1 ms (fork-join too small for steal benefit); wide+skew(8×5,0.25) WS=58.8 ms vs static=59.2 ms vs seq=97.2 ms (1.65× speedup over sequential). Steal rate is 0 locally — coordinator-mediated stealing is the key differentiator at Narval scale. 55/55 tests pass.
 - **2026-04-17:** Week 4 Session 1. PyO3 bindings in `crates/python` (new workspace member). `#[pyclass(name = "DAG")]` wraps a `Vec<Op>` builder; `matmul`/`relu`/`layer_norm`/`reduce` each append an `Op` and return its `u32` ID. `run(dag, workers)` constructs the `Dag`, pre-populates source tensors, and blocks a new `tokio::Runtime` on `WorkStealingScheduler::execute`. `pyproject.toml` uses maturin 1.x. `maturin develop` + `python ferroflow/examples/simple_mlp.py` verified — 33/33 tests pass.
+- **2026-04-24:** Week 7 Session 1. GitHub Issue #4: additional ONNX op support. Added `OpKind::Softmax`, `OpKind::BatchNorm { epsilon }`, `OpKind::Conv2d { kernel_size, stride, padding }` to `crates/core/src/op.rs`. Implemented all three in `crates/core/src/ops.rs`: softmax uses numerically-stable max-subtraction along last axis; batch_norm is inference-mode only with per-channel broadcast for [N,C,H,W] and [N,C] inputs; conv2d uses im2col + explicit GEMM (loops with comment — correctness over cleverness). Wired `Softmax`, `BatchNormalization` (with epsilon attribute), and `Conv` (kernel_shape/strides/pads attrs, dilation≠1 errors) into `crates/onnx/src/lib.rs`. Fixed exhaustive match in `crates/runtime/src/executor.rs` and `src/main.rs`. Added 9 unit tests (3 per op). Updated README supported ops table. Added `scripts/export_resnet.py`. 76/76 tests pass.
 - **2026-04-18:** Week 6 Session 2. Code quality + CI pass. Fixed all clippy warnings (`manual_is_multiple_of`, `too_many_arguments` via `SyntheticDagParams` struct, `if_same_then_else` in python crate). Replaced all `.unwrap()`/`.expect()` in library code with proper `?` propagation; added `WorkerPanicked` and `Internal` variants to `SchedulerError` and `ExecutorError`. `cargo doc --no-deps` emits zero warnings. Created `.github/workflows/ci.yml` (test/clippy/fmt jobs, `release/*` + `main` triggers). CI badge already present in README. 63/63 tests pass locally.

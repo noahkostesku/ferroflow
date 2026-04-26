@@ -11,8 +11,9 @@ use tract_onnx::prelude::Framework;
 /// Parse an ONNX model file into a ferroflow [`Dag`].
 ///
 /// Supported ONNX op types: `MatMul`, `Gemm`, `Relu`, `LayerNormalization`,
-/// `ReduceMean`, `GlobalAveragePool`. All other op types return an error
-/// containing the unsupported op name.
+/// `ReduceMean`, `GlobalAveragePool`, `Softmax`, `BatchNormalization`, `Conv`,
+/// `Add`, `MaxPool`, `Reshape`.
+/// All other op types return an error containing the unsupported op name.
 ///
 /// `Gemm` is mapped to [`OpKind::Matmul`]; the optional bias input is dropped
 /// and `transB=1` weights are shape-transposed in the accompanying source tensors
@@ -43,7 +44,8 @@ pub fn load_model(path: &Path) -> Result<(Dag, HashMap<OpId, Tensor>)> {
 }
 
 /// Returns a human-readable summary of `dag`: total op count, source/compute
-/// split, edge count, and a per-type breakdown of compute ops.
+/// split, edge count, a per-type breakdown of compute ops, and a list of any
+/// unsupported ONNX op types encountered during parsing.
 pub fn dag_summary(dag: &Dag) -> String {
     let n_ops = dag.ops.len();
     let n_edges: usize = dag.ops.iter().map(|op| op.input_ids.len()).sum();
@@ -51,9 +53,14 @@ pub fn dag_summary(dag: &Dag) -> String {
     let n_compute = n_ops - n_sources;
 
     let mut counts: HashMap<&'static str, usize> = HashMap::new();
+    let mut unsupported: HashMap<String, usize> = HashMap::new();
     for op in &dag.ops {
         if !op.input_ids.is_empty() {
-            *counts.entry(op_kind_label(&op.kind)).or_default() += 1;
+            if let OpKind::Unsupported { name } = &op.kind {
+                *unsupported.entry(name.clone()).or_default() += 1;
+            } else {
+                *counts.entry(op_kind_label(&op.kind)).or_default() += 1;
+            }
         }
     }
 
@@ -63,10 +70,21 @@ pub fn dag_summary(dag: &Dag) -> String {
         .collect();
     breakdown.sort();
 
-    format!(
+    let mut lines = format!(
         "{n_ops} ops ({n_sources} sources, {n_compute} compute), {n_edges} edges\n{}",
         breakdown.join("\n")
-    )
+    );
+
+    if !unsupported.is_empty() {
+        let mut u_list: Vec<String> = unsupported
+            .iter()
+            .map(|(k, &v)| format!("  {k}: {v}"))
+            .collect();
+        u_list.sort();
+        lines.push_str(&format!("\nunsupported (parsed, not executable):\n{}", u_list.join("\n")));
+    }
+
+    lines
 }
 
 // ── internals ────────────────────────────────────────────────────────────────
@@ -77,7 +95,14 @@ fn op_kind_label(kind: &OpKind) -> &'static str {
         OpKind::Relu { .. } => "relu",
         OpKind::LayerNorm { .. } => "layer_norm",
         OpKind::Reduce { .. } => "reduce",
+        OpKind::Softmax { .. } => "softmax",
+        OpKind::BatchNorm { .. } => "batch_norm",
+        OpKind::Conv2d { .. } => "conv2d",
+        OpKind::Add => "add",
+        OpKind::MaxPool { .. } => "maxpool",
+        OpKind::Reshape { .. } => "reshape",
         OpKind::Slow { .. } => "slow",
+        OpKind::Unsupported { .. } => "unsupported",
     }
 }
 
@@ -181,6 +206,10 @@ fn op_max_inputs(op_type: &str) -> usize {
         "Gemm" => 2,
         // LayerNormalization: (input, scale, bias) — drop scale/bias.
         "LayerNormalization" => 1,
+        // Conv: (input, weight[, bias]) — drop bias for now.
+        "Conv" => 2,
+        // Reshape: (data, shape_tensor) — shape comes from output_shape, not the tensor.
+        "Reshape" => 1,
         _ => usize::MAX,
     }
 }
@@ -205,7 +234,40 @@ fn map_op_kind(op_type: &str, output_shape: &[usize], attrs: &[AttributeProto]) 
                 .unwrap_or(0) as usize;
             Ok(OpKind::Reduce { axis, len })
         }
-        other => bail!("unsupported ONNX op: '{}'", other),
+        "Softmax" => Ok(OpKind::Softmax { len }),
+        "BatchNormalization" => {
+            let epsilon = get_float_attr(attrs, "epsilon").unwrap_or(1e-5);
+            Ok(OpKind::BatchNorm { epsilon })
+        }
+        "Conv" => {
+            let kernel_shape = get_int_list_attr(attrs, "kernel_shape");
+            let kernel_size = kernel_shape.first().copied().unwrap_or(1) as usize;
+            let strides = get_int_list_attr(attrs, "strides");
+            let stride = strides.first().copied().unwrap_or(1) as usize;
+            let pads = get_int_list_attr(attrs, "pads");
+            let padding = pads.first().copied().unwrap_or(0) as usize;
+            let dilations = get_int_list_attr(attrs, "dilations");
+            if dilations.iter().any(|&d| d != 1) {
+                bail!("Conv with dilations != 1 is not supported");
+            }
+            Ok(OpKind::Conv2d { kernel_size, stride, padding })
+        }
+        "Add" => Ok(OpKind::Add),
+        "MaxPool" => {
+            let kernel_shape = get_int_list_attr(attrs, "kernel_shape");
+            let kernel_size = kernel_shape.first().copied().unwrap_or(1) as usize;
+            let strides = get_int_list_attr(attrs, "strides");
+            let stride = strides.first().copied().unwrap_or(1) as usize;
+            let pads = get_int_list_attr(attrs, "pads");
+            let padding = pads.first().copied().unwrap_or(0) as usize;
+            Ok(OpKind::MaxPool { kernel_size, stride, padding })
+        }
+        "Reshape" => {
+            // Output shape is known from the shape_map; encode it as the target_shape.
+            let target_shape: Vec<i64> = output_shape.iter().map(|&d| d as i64).collect();
+            Ok(OpKind::Reshape { target_shape })
+        }
+        other => Ok(OpKind::Unsupported { name: other.to_string() }),
     }
 }
 
@@ -255,6 +317,18 @@ fn shape_from_value_info(vi: &ValueInfoProto) -> Option<Vec<usize>> {
 
 fn get_int_attr(attrs: &[AttributeProto], name: &str) -> Option<i64> {
     attrs.iter().find(|a| a.name == name).map(|a| a.i)
+}
+
+fn get_float_attr(attrs: &[AttributeProto], name: &str) -> Option<f32> {
+    attrs.iter().find(|a| a.name == name).map(|a| a.f)
+}
+
+fn get_int_list_attr(attrs: &[AttributeProto], name: &str) -> Vec<i64> {
+    attrs
+        .iter()
+        .find(|a| a.name == name)
+        .map(|a| a.ints.clone())
+        .unwrap_or_default()
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -368,20 +442,21 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_op_returns_error() {
-        // Reuse RELU_ONNX but patch op_type bytes to "Conv" (4 bytes, same length as Relu).
+    fn unsupported_op_parses_and_appears_in_summary() {
+        // Reuse RELU_ONNX but patch op_type bytes to "MaxP" (4 bytes, same length as Relu).
         let mut bytes = RELU_ONNX.to_vec();
-        // "Relu" starts at offset 18 in the byte slice (after the 0x22, 0x04 tag+len).
-        // Find it and replace with "Conv".
         let relu = b"Relu";
-        let conv = b"Conv";
+        let maxp = b"MaxP";
         if let Some(pos) = bytes.windows(4).position(|w| w == relu) {
-            bytes[pos..pos + 4].copy_from_slice(conv);
+            bytes[pos..pos + 4].copy_from_slice(maxp);
         }
-        let path = write_tmp("ferroflow_conv.onnx", &bytes);
-        match parse_onnx(&path) {
-            Ok(_) => panic!("expected error for unsupported op"),
-            Err(e) => assert!(e.to_string().contains("Conv"), "err: {e}"),
-        }
+        let path = write_tmp("ferroflow_maxp.onnx", &bytes);
+        let dag = parse_onnx(&path).expect("parse must succeed for unknown op");
+        let summary = dag_summary(&dag);
+        assert!(summary.contains("MaxP"), "summary should name the unsupported op: {summary}");
+        assert!(
+            matches!(dag.ops[1].kind, OpKind::Unsupported { .. }),
+            "op kind should be Unsupported"
+        );
     }
 }
