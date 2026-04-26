@@ -106,7 +106,11 @@ fn op_kind_name(kind: &ferroflow_core::OpKind) -> &'static str {
         ferroflow_core::OpKind::Relu { .. } => "relu",
         ferroflow_core::OpKind::LayerNorm { .. } => "layer_norm",
         ferroflow_core::OpKind::Reduce { .. } => "reduce",
+        ferroflow_core::OpKind::Softmax { .. } => "softmax",
+        ferroflow_core::OpKind::BatchNorm { .. } => "batch_norm",
+        ferroflow_core::OpKind::Conv2d { .. } => "conv2d",
         ferroflow_core::OpKind::Slow { .. } => "slow",
+        ferroflow_core::OpKind::Unsupported { .. } => "unsupported",
     }
 }
 

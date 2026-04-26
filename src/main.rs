@@ -338,7 +338,11 @@ fn synthetic_dag_summary(dag: &Dag) -> String {
                 OpKind::Relu { .. } => "relu",
                 OpKind::LayerNorm { .. } => "layer_norm",
                 OpKind::Reduce { .. } => "reduce",
+                OpKind::Softmax { .. } => "softmax",
+                OpKind::BatchNorm { .. } => "batch_norm",
+                OpKind::Conv2d { .. } => "conv2d",
                 OpKind::Slow { .. } => "slow",
+                OpKind::Unsupported { .. } => "unsupported",
             };
             *counts.entry(label).or_default() += 1;
         }

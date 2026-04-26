@@ -15,9 +15,21 @@ pub enum OpKind {
     LayerNorm { len: usize },
     /// Sum-reduction along a single axis.
     Reduce { axis: usize, len: usize },
+    /// Numerically-stable softmax along the last axis: exp(x−max) / Σexp(x−max).
+    Softmax { len: usize },
+    /// Batch normalisation (inference mode): scale * (x − mean) / sqrt(var + ε) + bias.
+    BatchNorm { epsilon: f32 },
+    /// 2-D convolution via im2col + GEMM.
+    Conv2d {
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+    },
     /// Artificial delay: sleeps for `duration_ms` milliseconds then passes the
     /// single input tensor through unchanged.  Used for skew injection in benchmarks.
     Slow { duration_ms: u64 },
+    /// Parsed but not yet implemented.  Execution returns an error; `info` reports it.
+    Unsupported { name: String },
 }
 
 impl OpKind {
@@ -27,9 +39,14 @@ impl OpKind {
     pub fn cost_estimate(&self) -> u64 {
         match self {
             OpKind::Matmul { m, n, k } => (m * n * k) as u64,
-            OpKind::Relu { len } | OpKind::LayerNorm { len } => *len as u64,
+            OpKind::Relu { len } | OpKind::LayerNorm { len } | OpKind::Softmax { len } => {
+                *len as u64
+            }
+            OpKind::BatchNorm { .. } => 1,
+            OpKind::Conv2d { .. } => 1,
             OpKind::Reduce { len, .. } => *len as u64,
             OpKind::Slow { duration_ms } => *duration_ms,
+            OpKind::Unsupported { .. } => 0,
         }
     }
 }
