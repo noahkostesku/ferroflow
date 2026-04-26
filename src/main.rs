@@ -341,6 +341,9 @@ fn synthetic_dag_summary(dag: &Dag) -> String {
                 OpKind::Softmax { .. } => "softmax",
                 OpKind::BatchNorm { .. } => "batch_norm",
                 OpKind::Conv2d { .. } => "conv2d",
+                OpKind::Add => "add",
+                OpKind::MaxPool { .. } => "maxpool",
+                OpKind::Reshape { .. } => "reshape",
                 OpKind::Slow { .. } => "slow",
                 OpKind::Unsupported { .. } => "unsupported",
             };

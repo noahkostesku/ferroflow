@@ -1,4 +1,4 @@
-use ndarray::{Axis, Ix2, Ix4};
+use ndarray::{Axis, Ix2, Ix4, IxDyn};
 use thiserror::Error;
 
 use crate::op::{Op, OpKind};
@@ -67,6 +67,22 @@ pub fn execute_op(op: &Op, tensors: &[&Tensor]) -> Result<Tensor, OpError> {
         } => {
             require_inputs("conv2d", tensors, 2)?;
             conv2d(tensors[0], tensors[1], *kernel_size, *stride, *padding)
+        }
+        OpKind::Add => {
+            require_inputs("add", tensors, 2)?;
+            add(tensors[0], tensors[1])
+        }
+        OpKind::MaxPool {
+            kernel_size,
+            stride,
+            padding,
+        } => {
+            require_inputs("maxpool", tensors, 1)?;
+            maxpool(tensors[0], *kernel_size, *stride, *padding)
+        }
+        OpKind::Reshape { target_shape } => {
+            require_inputs("reshape", tensors, 1)?;
+            reshape(tensors[0], target_shape)
         }
         OpKind::Slow { duration_ms } => {
             require_inputs("slow", tensors, 1)?;
@@ -353,6 +369,158 @@ fn conv2d(x: &Tensor, weight: &Tensor, kernel_size: usize, stride: usize, paddin
         .map_err(|e| OpError::ShapeMismatch(e.to_string()))
 }
 
+/// Element-wise addition of two tensors with NumPy-style broadcasting.
+///
+/// If shapes are identical the sum is computed directly. Otherwise the smaller
+/// tensor is broadcast to the larger shape per standard NumPy rules.
+///
+/// # Errors
+/// Returns [`OpError::ShapeMismatch`] if the shapes are not broadcast-compatible.
+fn add(a: &Tensor, b: &Tensor) -> Result<Tensor, OpError> {
+    if a.shape() == b.shape() {
+        return Ok(Tensor { data: (&a.data + &b.data) });
+    }
+    let out_shape = broadcast_shape(a.shape(), b.shape())?;
+    let a_bc = a.data.broadcast(IxDyn(&out_shape)).ok_or_else(|| {
+        OpError::ShapeMismatch(format!(
+            "add: cannot broadcast {:?} to {:?}",
+            a.shape(),
+            out_shape
+        ))
+    })?;
+    let b_bc = b.data.broadcast(IxDyn(&out_shape)).ok_or_else(|| {
+        OpError::ShapeMismatch(format!(
+            "add: cannot broadcast {:?} to {:?}",
+            b.shape(),
+            out_shape
+        ))
+    })?;
+    Ok(Tensor { data: (&a_bc + &b_bc) })
+}
+
+/// Compute the output shape when broadcasting `a` and `b` together.
+fn broadcast_shape(a: &[usize], b: &[usize]) -> Result<Vec<usize>, OpError> {
+    let rank = a.len().max(b.len());
+    let mut out = vec![0usize; rank];
+    let a_off = rank - a.len();
+    let b_off = rank - b.len();
+    for i in 0..rank {
+        let ai = if i >= a_off { a[i - a_off] } else { 1 };
+        let bi = if i >= b_off { b[i - b_off] } else { 1 };
+        out[i] = match (ai, bi) {
+            (x, y) if x == y => x,
+            (1, y) => y,
+            (x, 1) => x,
+            _ => {
+                return Err(OpError::ShapeMismatch(format!(
+                    "add: shapes {:?} and {:?} are not broadcast-compatible",
+                    a, b
+                )))
+            }
+        };
+    }
+    Ok(out)
+}
+
+/// 2-D max pooling.
+///
+/// Input:  `x` — shape [N, C, H, W]
+/// Output: shape [N, C, out_H, out_W]
+///   where out_H = (H + 2*padding − kernel_size) / stride + 1
+///
+/// # Errors
+/// Returns [`OpError::Dimensionality`] if the input is not 4-D.
+fn maxpool(x: &Tensor, kernel_size: usize, stride: usize, padding: usize) -> Result<Tensor, OpError> {
+    if x.ndim() != 4 {
+        return Err(OpError::Dimensionality(format!(
+            "maxpool input must be 4-D [N,C,H,W], got {:?}",
+            x.shape()
+        )));
+    }
+    let (n, c, h, w) = (x.shape()[0], x.shape()[1], x.shape()[2], x.shape()[3]);
+    let out_h = (h + 2 * padding - kernel_size) / stride + 1;
+    let out_w = (w + 2 * padding - kernel_size) / stride + 1;
+
+    let x4 = x.data.view().into_dimensionality::<Ix4>().map_err(|_| {
+        OpError::Dimensionality("maxpool: failed to view input as Ix4".into())
+    })?;
+
+    let mut out_data = vec![f32::NEG_INFINITY; n * c * out_h * out_w];
+    for ni in 0..n {
+        for ci in 0..c {
+            for oh in 0..out_h {
+                for ow in 0..out_w {
+                    let mut max_val = f32::NEG_INFINITY;
+                    for khi in 0..kernel_size {
+                        for kwi in 0..kernel_size {
+                            let ih = oh * stride + khi;
+                            let iw = ow * stride + kwi;
+                            let val = if padding > 0 {
+                                let ihi = ih as isize - padding as isize;
+                                let iwi = iw as isize - padding as isize;
+                                if ihi < 0
+                                    || ihi >= h as isize
+                                    || iwi < 0
+                                    || iwi >= w as isize
+                                {
+                                    f32::NEG_INFINITY
+                                } else {
+                                    x4[[ni, ci, ihi as usize, iwi as usize]]
+                                }
+                            } else {
+                                x4[[ni, ci, ih, iw]]
+                            };
+                            max_val = max_val.max(val);
+                        }
+                    }
+                    let dst = ni * c * out_h * out_w + ci * out_h * out_w + oh * out_w + ow;
+                    out_data[dst] = max_val;
+                }
+            }
+        }
+    }
+    Tensor::from_shape_vec(&[n, c, out_h, out_w], out_data)
+        .map_err(|e| OpError::ShapeMismatch(e.to_string()))
+}
+
+/// Reshape a tensor, resolving any `-1` dimension from the element count.
+///
+/// # Errors
+/// Returns [`OpError::ShapeMismatch`] if more than one dimension is `-1` or the
+/// total element count is inconsistent with the new shape.
+fn reshape(x: &Tensor, target_shape: &[i64]) -> Result<Tensor, OpError> {
+    let total = x.numel();
+    let neg_count = target_shape.iter().filter(|&&d| d < 0).count();
+    if neg_count > 1 {
+        return Err(OpError::ShapeMismatch(
+            "reshape: at most one -1 dimension allowed".into(),
+        ));
+    }
+    let known_product: usize = target_shape
+        .iter()
+        .filter(|&&d| d >= 0)
+        .map(|&d| d as usize)
+        .product();
+    let shape: Vec<usize> = target_shape
+        .iter()
+        .map(|&d| {
+            if d < 0 {
+                if known_product == 0 { 0 } else { total / known_product }
+            } else {
+                d as usize
+            }
+        })
+        .collect();
+    let new_total: usize = shape.iter().product();
+    if new_total != total {
+        return Err(OpError::ShapeMismatch(format!(
+            "reshape: {total} elements cannot reshape to {shape:?} ({new_total} elements)"
+        )));
+    }
+    let flat: Vec<f32> = x.data.iter().copied().collect();
+    Tensor::from_shape_vec(&shape, flat).map_err(|e| OpError::ShapeMismatch(e.to_string()))
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -533,6 +701,118 @@ mod tests {
         for (i, (a, b)) in xf.iter().zip(&of).enumerate() {
             assert!((a - b).abs() < 1e-5, "i={i} x={a} out={b}");
         }
+    }
+
+    // ── add ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn add_same_shape() {
+        let a = Tensor::from_shape_vec(&[3], vec![1., 2., 3.]).unwrap();
+        let b = Tensor::from_shape_vec(&[3], vec![4., 5., 6.]).unwrap();
+        let out = execute_op(&op(OpKind::Add), &[&a, &b]).unwrap();
+        let flat: Vec<f32> = out.data.iter().copied().collect();
+        assert_eq!(flat, vec![5., 7., 9.]);
+        assert_eq!(out.shape(), &[3]);
+    }
+
+    #[test]
+    fn add_broadcast_scalar() {
+        let scalar = Tensor::from_shape_vec(&[1], vec![10.]).unwrap();
+        let x = Tensor::from_shape_vec(&[3], vec![1., 2., 3.]).unwrap();
+        let out = execute_op(&op(OpKind::Add), &[&scalar, &x]).unwrap();
+        let flat: Vec<f32> = out.data.iter().copied().collect();
+        assert_eq!(flat, vec![11., 12., 13.]);
+    }
+
+    #[test]
+    fn add_preserves_shape() {
+        let a = Tensor::from_shape_vec(&[2, 3], vec![1.; 6]).unwrap();
+        let b = Tensor::from_shape_vec(&[2, 3], vec![2.; 6]).unwrap();
+        let out = execute_op(&op(OpKind::Add), &[&a, &b]).unwrap();
+        assert_eq!(out.shape(), &[2, 3]);
+    }
+
+    // ── maxpool ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn maxpool_2x2_stride2_on_4x4() {
+        // 4×4 input with values 1..16; 2×2 pool stride=2 → 2×2 output
+        let data: Vec<f32> = (1..=16).map(|v| v as f32).collect();
+        let x = Tensor::from_shape_vec(&[1, 1, 4, 4], data).unwrap();
+        let out = execute_op(
+            &op(OpKind::MaxPool { kernel_size: 2, stride: 2, padding: 0 }),
+            &[&x],
+        )
+        .unwrap();
+        assert_eq!(out.shape(), &[1, 1, 2, 2]);
+        // top-left 2×2: [1,2,5,6] → max=6; top-right 2×2: [3,4,7,8] → max=8
+        // bot-left 2×2: [9,10,13,14] → max=14; bot-right 2×2: [11,12,15,16] → max=16
+        let flat: Vec<f32> = out.data.iter().copied().collect();
+        assert_eq!(flat, vec![6., 8., 14., 16.]);
+    }
+
+    #[test]
+    fn maxpool_selects_max_not_sum() {
+        // single 2×2 input with distinct values
+        let x = Tensor::from_shape_vec(&[1, 1, 2, 2], vec![3., 1., 4., 2.]).unwrap();
+        let out = execute_op(
+            &op(OpKind::MaxPool { kernel_size: 2, stride: 2, padding: 0 }),
+            &[&x],
+        )
+        .unwrap();
+        let flat: Vec<f32> = out.data.iter().copied().collect();
+        assert_eq!(flat, vec![4.]);
+    }
+
+    #[test]
+    fn maxpool_stride_reduces_spatial() {
+        // [1,1,4,4] with stride=2 → [1,1,2,2]
+        let x = Tensor::from_shape_vec(&[1, 1, 4, 4], vec![1.0; 16]).unwrap();
+        let out = execute_op(
+            &op(OpKind::MaxPool { kernel_size: 2, stride: 2, padding: 0 }),
+            &[&x],
+        )
+        .unwrap();
+        assert_eq!(out.shape(), &[1, 1, 2, 2]);
+    }
+
+    // ── reshape ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn reshape_2x3x4_to_2x12() {
+        let x = Tensor::from_shape_vec(&[2, 3, 4], (0..24).map(|v| v as f32).collect()).unwrap();
+        let out = execute_op(
+            &op(OpKind::Reshape { target_shape: vec![2, 12] }),
+            &[&x],
+        )
+        .unwrap();
+        assert_eq!(out.shape(), &[2, 12]);
+        let xf: Vec<f32> = x.data.iter().copied().collect();
+        let of: Vec<f32> = out.data.iter().copied().collect();
+        assert_eq!(xf, of);
+    }
+
+    #[test]
+    fn reshape_flat_to_3d() {
+        let x = Tensor::from_shape_vec(&[24], (0..24).map(|v| v as f32).collect()).unwrap();
+        let out = execute_op(
+            &op(OpKind::Reshape { target_shape: vec![2, 3, 4] }),
+            &[&x],
+        )
+        .unwrap();
+        assert_eq!(out.shape(), &[2, 3, 4]);
+    }
+
+    #[test]
+    fn reshape_neg1_inference() {
+        // [2,3,4] → [2,-1] should produce [2,12]
+        let x = Tensor::from_shape_vec(&[2, 3, 4], vec![0.0; 24]).unwrap();
+        let out = execute_op(
+            &op(OpKind::Reshape { target_shape: vec![2, -1] }),
+            &[&x],
+        )
+        .unwrap();
+        assert_eq!(out.shape(), &[2, 12]);
     }
 
     // ── arity guard ─────────────────────────────────────────────────────────

@@ -11,7 +11,8 @@ use tract_onnx::prelude::Framework;
 /// Parse an ONNX model file into a ferroflow [`Dag`].
 ///
 /// Supported ONNX op types: `MatMul`, `Gemm`, `Relu`, `LayerNormalization`,
-/// `ReduceMean`, `GlobalAveragePool`, `Softmax`, `BatchNormalization`, `Conv`.
+/// `ReduceMean`, `GlobalAveragePool`, `Softmax`, `BatchNormalization`, `Conv`,
+/// `Add`, `MaxPool`, `Reshape`.
 /// All other op types return an error containing the unsupported op name.
 ///
 /// `Gemm` is mapped to [`OpKind::Matmul`]; the optional bias input is dropped
@@ -97,6 +98,9 @@ fn op_kind_label(kind: &OpKind) -> &'static str {
         OpKind::Softmax { .. } => "softmax",
         OpKind::BatchNorm { .. } => "batch_norm",
         OpKind::Conv2d { .. } => "conv2d",
+        OpKind::Add => "add",
+        OpKind::MaxPool { .. } => "maxpool",
+        OpKind::Reshape { .. } => "reshape",
         OpKind::Slow { .. } => "slow",
         OpKind::Unsupported { .. } => "unsupported",
     }
@@ -204,6 +208,8 @@ fn op_max_inputs(op_type: &str) -> usize {
         "LayerNormalization" => 1,
         // Conv: (input, weight[, bias]) — drop bias for now.
         "Conv" => 2,
+        // Reshape: (data, shape_tensor) — shape comes from output_shape, not the tensor.
+        "Reshape" => 1,
         _ => usize::MAX,
     }
 }
@@ -245,6 +251,21 @@ fn map_op_kind(op_type: &str, output_shape: &[usize], attrs: &[AttributeProto]) 
                 bail!("Conv with dilations != 1 is not supported");
             }
             Ok(OpKind::Conv2d { kernel_size, stride, padding })
+        }
+        "Add" => Ok(OpKind::Add),
+        "MaxPool" => {
+            let kernel_shape = get_int_list_attr(attrs, "kernel_shape");
+            let kernel_size = kernel_shape.first().copied().unwrap_or(1) as usize;
+            let strides = get_int_list_attr(attrs, "strides");
+            let stride = strides.first().copied().unwrap_or(1) as usize;
+            let pads = get_int_list_attr(attrs, "pads");
+            let padding = pads.first().copied().unwrap_or(0) as usize;
+            Ok(OpKind::MaxPool { kernel_size, stride, padding })
+        }
+        "Reshape" => {
+            // Output shape is known from the shape_map; encode it as the target_shape.
+            let target_shape: Vec<i64> = output_shape.iter().map(|&d| d as i64).collect();
+            Ok(OpKind::Reshape { target_shape })
         }
         other => Ok(OpKind::Unsupported { name: other.to_string() }),
     }

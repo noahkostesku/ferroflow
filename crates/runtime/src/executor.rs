@@ -109,6 +109,9 @@ fn op_kind_name(kind: &ferroflow_core::OpKind) -> &'static str {
         ferroflow_core::OpKind::Softmax { .. } => "softmax",
         ferroflow_core::OpKind::BatchNorm { .. } => "batch_norm",
         ferroflow_core::OpKind::Conv2d { .. } => "conv2d",
+        ferroflow_core::OpKind::Add => "add",
+        ferroflow_core::OpKind::MaxPool { .. } => "maxpool",
+        ferroflow_core::OpKind::Reshape { .. } => "reshape",
         ferroflow_core::OpKind::Slow { .. } => "slow",
         ferroflow_core::OpKind::Unsupported { .. } => "unsupported",
     }
