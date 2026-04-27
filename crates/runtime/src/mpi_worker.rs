@@ -260,6 +260,8 @@ fn coordinator_loop<C: Communicator>(
         agg_idle_ms,
         agg_steal_attempts,
         agg_successful_steals,
+        0,
+        0,
     );
 
     Ok((tensor_store, metrics))

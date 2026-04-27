@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,65 @@ const DEFAULT_STEAL_THRESHOLD: usize = 2;
 const STATUS_IDLE: u8 = 0;
 const STATUS_EXEC: u8 = 1;
 const STATUS_STEAL: u8 = 2;
+const STEAL_HISTORY_WINDOW: usize = 20;
+const ADAPTIVE_UPDATE_INTERVAL: usize = 10;
+
+/// Rolling window of steal outcomes used to compute the adaptive steal threshold.
+struct StealHistory {
+    window: VecDeque<bool>,
+}
+
+impl StealHistory {
+    fn new() -> Self {
+        Self {
+            window: VecDeque::with_capacity(STEAL_HISTORY_WINDOW),
+        }
+    }
+
+    /// Records one steal outcome and slides the window forward.
+    fn record(&mut self, success: bool) {
+        if self.window.len() >= STEAL_HISTORY_WINDOW {
+            self.window.pop_front();
+        }
+        self.window.push_back(success);
+    }
+
+    /// Fraction of recent steal attempts that succeeded.
+    ///
+    /// Returns 1.0 when the window is empty (optimistic start — steal freely until
+    /// we have evidence to back off).
+    fn success_rate(&self) -> f64 {
+        if self.window.is_empty() {
+            return 1.0;
+        }
+        self.window.iter().filter(|&&s| s).count() as f64 / STEAL_HISTORY_WINDOW as f64
+    }
+}
+
+/// Computes the new steal threshold for one worker based on recent steal outcomes.
+///
+/// Rules:
+/// - Base: `max(1, n_workers / 8)` — scales with worker count so large pools don't all steal at once.
+/// - `rate > 0.7` → lower threshold by 1 (stealing is productive, be more aggressive).
+/// - `rate < 0.3` → raise threshold by 2 (stealing is futile, back off).
+/// - Otherwise → keep `current_threshold`.
+/// - Result is clamped to `[1, max(4, n_workers / 4)]`.
+fn adaptive_threshold(
+    current_threshold: usize,
+    history: &StealHistory,
+    n_workers: usize,
+) -> usize {
+    let rate = history.success_rate();
+    let raw = if rate > 0.7 {
+        current_threshold.saturating_sub(1)
+    } else if rate < 0.3 {
+        current_threshold + 2
+    } else {
+        current_threshold
+    };
+    let max_t = (n_workers / 4).max(4);
+    raw.clamp(1, max_t)
+}
 
 /// Errors returned by [`WorkStealingScheduler::execute`].
 ///
@@ -27,31 +86,42 @@ pub type WorkStealingError = SchedulerError;
 ///
 /// Workers start with a static round-robin assignment and steal ops from
 /// busy peers when their own queue empties.  Stealing respects a threshold:
-/// a worker is only stolen from when its queue length exceeds `steal_threshold`
-/// (default 2), preventing starvation of the victim.  Failed steal attempts
-/// back off with a deterministic pseudo-random delay in the range 10–50 ms.
+/// a worker is only stolen from when its queue length exceeds `steal_threshold`.
+/// When `adaptive` is enabled (the default) each worker self-tunes its threshold
+/// every [`ADAPTIVE_UPDATE_INTERVAL`] steal attempts based on its recent success
+/// rate — see [`adaptive_threshold`].  Failed steal attempts back off with a
+/// deterministic pseudo-random delay in the range 10–50 ms.
 pub struct WorkStealingScheduler {
     n_workers: usize,
     steal_threshold: usize,
+    adaptive: bool,
     device: Device,
 }
 
 impl WorkStealingScheduler {
     /// Creates a new `WorkStealingScheduler` with `n_workers` concurrent workers,
-    /// the default steal threshold of 2, and [`Device::Cpu`].
+    /// adaptive threshold enabled, and [`Device::Cpu`].
     pub fn new(n_workers: usize) -> Self {
         assert!(n_workers > 0, "n_workers must be at least 1");
         Self {
             n_workers,
             steal_threshold: DEFAULT_STEAL_THRESHOLD,
+            adaptive: true,
             device: Device::Cpu,
         }
     }
 
-    /// Sets the steal threshold (minimum victim queue depth before stealing is
-    /// allowed) and returns `self`.
+    /// Sets the fixed steal threshold used when adaptive mode is off and returns `self`.
     pub fn with_steal_threshold(mut self, threshold: usize) -> Self {
         self.steal_threshold = threshold;
+        self
+    }
+
+    /// Enables or disables the adaptive threshold.  When disabled the fixed
+    /// `steal_threshold` (default 2, or set via [`with_steal_threshold`](Self::with_steal_threshold))
+    /// is used for the entire run.
+    pub fn with_adaptive_threshold(mut self, adaptive: bool) -> Self {
+        self.adaptive = adaptive;
         self
     }
 
@@ -95,7 +165,8 @@ impl WorkStealingScheduler {
         metrics_tx: watch::Sender<LiveMetrics>,
     ) -> Result<(HashMap<OpId, Tensor>, SchedulerMetrics), WorkStealingError> {
         let n = self.n_workers;
-        let steal_threshold = self.steal_threshold;
+        let fixed_threshold = self.steal_threshold;
+        let adaptive = self.adaptive;
         let total_ops = dag.ops.iter().filter(|op| !op.input_ids.is_empty()).count() as u64;
 
         // Per-worker queues with round-robin initial assignment.
@@ -114,6 +185,9 @@ impl WorkStealingScheduler {
         let completed = Arc::new(AtomicU64::new(0));
         let steal_attempts = Arc::new(AtomicU64::new(0));
         let successful_steals = Arc::new(AtomicU64::new(0));
+        let threshold_adjustments = Arc::new(AtomicU64::new(0));
+        // Stores the final threshold of any one worker — representative since all converge.
+        let threshold_final = Arc::new(AtomicUsize::new(fixed_threshold));
 
         // Per-worker tracking for the live-metrics ticker.
         let worker_ops: Arc<Vec<AtomicU64>> = Arc::new((0..n).map(|_| AtomicU64::new(0)).collect());
@@ -202,6 +276,8 @@ impl WorkStealingScheduler {
             let completed = Arc::clone(&completed);
             let steal_attempts = Arc::clone(&steal_attempts);
             let successful_steals = Arc::clone(&successful_steals);
+            let threshold_adjustments = Arc::clone(&threshold_adjustments);
+            let threshold_final = Arc::clone(&threshold_final);
             let worker_ops = Arc::clone(&worker_ops);
             let worker_status = Arc::clone(&worker_status);
             let worker_idle_us = Arc::clone(&worker_idle_us);
@@ -209,9 +285,15 @@ impl WorkStealingScheduler {
 
             handles.push(tokio::spawn(async move {
                 let mut attempt = 0usize;
+                // Per-worker adaptive threshold state — no shared mutable state, no locks.
+                let base_threshold = (n / 8).max(1);
+                let mut current_threshold = if adaptive { base_threshold } else { fixed_threshold };
+                let mut steal_history = StealHistory::new();
+                let mut attempts_since_update = 0usize;
 
                 loop {
                     if completed.load(Ordering::Acquire) >= total_ops {
+                        threshold_final.store(current_threshold, Ordering::Relaxed);
                         break;
                     }
 
@@ -225,11 +307,29 @@ impl WorkStealingScheduler {
                             for offset in 1..n {
                                 let victim = (worker_id + offset) % n;
                                 steal_attempts.fetch_add(1, Ordering::Relaxed);
-                                if let Some(id) =
-                                    queues[victim].steal_if_above(steal_threshold).await
-                                {
+                                let result =
+                                    queues[victim].steal_if_above(current_threshold).await;
+                                let success = result.is_some();
+                                steal_history.record(success);
+                                attempts_since_update += 1;
+
+                                if success {
                                     successful_steals.fetch_add(1, Ordering::Relaxed);
-                                    stolen = Some(id);
+                                    stolen = result;
+                                }
+
+                                // Recompute threshold every ADAPTIVE_UPDATE_INTERVAL attempts.
+                                if adaptive && attempts_since_update >= ADAPTIVE_UPDATE_INTERVAL {
+                                    let new_t =
+                                        adaptive_threshold(current_threshold, &steal_history, n);
+                                    if new_t != current_threshold {
+                                        threshold_adjustments.fetch_add(1, Ordering::Relaxed);
+                                        current_threshold = new_t;
+                                    }
+                                    attempts_since_update = 0;
+                                }
+
+                                if stolen.is_some() {
                                     break;
                                 }
                             }
@@ -323,7 +423,10 @@ impl WorkStealingScheduler {
         let idle_time_ms = total_idle_micros as f64 / 1000.0;
         let sa = steal_attempts.load(Ordering::Relaxed);
         let ss = successful_steals.load(Ordering::Relaxed);
-        let metrics = SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, sa, ss);
+        let ta = threshold_adjustments.load(Ordering::Relaxed);
+        let tf = threshold_final.load(Ordering::Relaxed);
+        let metrics =
+            SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, sa, ss, tf, ta);
 
         let store = Arc::try_unwrap(store)
             .map_err(|_| SchedulerError::Internal("all worker handles dropped"))?

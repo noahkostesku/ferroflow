@@ -154,7 +154,7 @@ impl StaticScheduler {
 
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let idle_time_ms = total_idle_micros as f64 / 1000.0;
-        let metrics = SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, 0, 0);
+        let metrics = SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, 0, 0, 0, 0);
 
         let store = Arc::try_unwrap(store)
             .map_err(|_| SchedulerError::Internal("all worker handles dropped"))?
