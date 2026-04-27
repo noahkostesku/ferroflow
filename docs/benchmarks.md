@@ -280,8 +280,18 @@ _Full multi-node scaling results (4 / 8 / 16 / 32 nodes) pending Narval runs._
 | xlarge-wide | fixed=2    | ~6153 ops/s | ~14/s      | —           |
 | xlarge-wide | adaptive   | ~6215 ops/s | ~34/s      | threshold→4 |
 
-**Result:** Adaptive threshold **ties or marginally outperforms** fixed alternatives on both DAGs within run-to-run noise (±20 ops/s). With n_workers=8, base threshold = max(1, 8/8) = 1; the adaptive threshold converges to 4 (the upper clamp = max(4, 8/4)) as end-of-job drain produces failed steals. During bulk execution it behaves identically to fixed=1.
+### GPU Benchmark (job 59957529, 2026-04-27)
 
-**Design note — local vs. Narval behaviour:** The adaptive benefit scales with worker count. At 32 workers (Narval, 1 node): base = max(1, 32/8) = 4, upper clamp = max(4, 32/4) = 8. High steal success rate (plenty of imbalance) drives threshold down to 1; low rate (balanced work, futile steals) raises threshold to 6–8, eliminating the wasted scan. That dynamic does not manifest locally at 8 workers where base=1 already covers the aggressive case.
+- **Machine:** Narval (Alliance Canada)
+- **GPU:** NVIDIA A100-SXM4-40GB
+- **CPU:** AMD EPYC Milan, 8 workers
+- **DAG:** matmul-parallel, real cuBLAS matmul ops
+- **Feature flag:** --features cuda
 
-**Issue #5 outcome:** Adaptive beats fixed=2 (the prior hardcoded default) on xlarge-wide (6215 vs 6153 ops/s, +1%) and ties on imbalanced. Closing Issue #5 — adaptive is the new default and the infrastructure is in place for Narval-scale tuning.
+| Config | Device | Ops | Throughput | Wall Time |
+|---|---|---|---|---|
+| 16×8 branches, 2048×2048 | CPU (8w) | 128 | 25 ops/s | 5,101ms |
+| 16×8 branches, 2048×2048 | A100 GPU | 128 | 62 ops/s | 2,049ms |
+| 8×8 branches, 4096×4096 | A100 GPU | 64 | 17 ops/s | 3,689ms |
+
+**Analysis:** The A100 achieves 2.5× higher throughput than 8 CPU workers on 2048×2048 matmul workloads. Per-op CPU↔GPU transfer overhead limits the speedup — each of the 128 ops transfers input tensors to GPU memory, executes cuBLAS GEMM, and returns results to CPU for DAG dependency resolution. Persistent GPU tensor storage across dependent ops would eliminate this overhead and is the primary optimization target for the GPU path.

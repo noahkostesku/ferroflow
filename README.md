@@ -12,14 +12,16 @@ Static scheduling concentrates slow ops on specific workers, leaving others idle
 
 ## Results
 
-| Workload | Nodes | Static | ferroflow WS | Advantage |
+| Workload | Device | Scheduler | Throughput | Advantage |
 |---|---|---|---|---|
-| Imbalanced DAG | 2 | 900 ops/s | 1,014 ops/s | +12.7% |
-| XLarge Wide DAG | 8 | 27,631 ops/s | 28,839 ops/s | +4.4% |
-| XLarge Wide DAG | 8 | — | 28,839 ops/s | 97% efficiency |
-| Transformer DAG | 8 | ~580 ops/s | ~580 ops/s | DAG-bounded |
+| Imbalanced DAG (2 nodes) | CPU | work-stealing | 1,014 ops/s | +12.7% vs static |
+| XLarge Wide DAG (8 nodes) | CPU | work-stealing | 28,839 ops/s | 97% efficiency |
+| Matmul-parallel 2048×2048 | CPU (8 workers) | work-stealing | 25 ops/s | baseline |
+| Matmul-parallel 2048×2048 | A100 GPU | work-stealing | 62 ops/s | 2.5× faster than CPU |
 
-Narval supercomputer (Alliance Canada), AMD EPYC Milan, 100Gb/s interconnect. 5-run medians. job 59826638.
+Narval supercomputer (Alliance Canada).
+AMD EPYC Milan (CPU) / A100-SXM4-40GB (GPU).
+5-run medians for scaling study, single run for GPU benchmark.
 
 ---
 
@@ -132,6 +134,34 @@ On parallel skewed workloads (xlarge-wide, 1281 ops), work-stealing maintains 97
 
 ---
 
+### GPU Acceleration (A100)
+
+ferroflow routes matmul ops to GPU via cuBLAS when `--device cuda` is set. Other op types execute on CPU with automatic tensor transfer.
+
+| Matrix Size | CPU (8 workers) | A100 GPU | Speedup |
+|---|---|---|---|
+| 2048×2048 | 25 ops/s | 62 ops/s | 2.5× |
+| 4096×4096 | — | 17 ops/s | — |
+
+The 2.5× speedup reflects per-op CPU↔GPU transfer overhead — each op moves tensors to GPU, computes via cuBLAS, and returns results to CPU for dependency tracking. Eliminating this transfer overhead through persistent GPU tensor storage is the next optimization target (see roadmap).
+
+To run with GPU acceleration:
+
+```bash
+# Build with CUDA support
+module load StdEnv/2023 gcc/12.3 cuda/12.2 rust/1.91.0
+cargo build --release --features cuda
+
+# Run on GPU
+ferroflow run --dag matmul-parallel \
+  --n-branches 16 --ops-per-branch 8 --matrix-size 2048 \
+  --workers 8 --device cuda
+```
+
+Requires: CUDA 12.x, A100 or compatible GPU.
+
+---
+
 ## Narval setup
 
 Load the verified module stack before building or submitting jobs:
@@ -151,14 +181,16 @@ See [docs/narval-setup.md](docs/narval-setup.md) for full environment notes and 
 
 ## Roadmap
 
-Open issues are tracked on GitHub. Current priorities:
-
-1. Larger DAGs to fully validate work-stealing at scale (#1)
-2. Adaptive steal threshold (#2)  
-3. Peer-to-peer stealing to remove coordinator bottleneck (#3)
-4. Additional ONNX ops: Conv2d, BatchNorm, Softmax (#4)
-5. CUDA support on Narval A100s (#5)
-6. Multi-cluster benchmarks: Fir, Rorqual (#6)
+| Issue | Description | Status |
+|---|---|---|
+| #1 | Larger DAGs (500+ ops) to validate work-stealing at scale | ✅ closed |
+| #2 | Adaptive steal threshold | ✅ closed |
+| #4 | Additional ONNX ops (Conv2d, BatchNorm, Softmax, Add, MaxPool, Reshape) | ✅ closed |
+| #8 | CUDA support via cudarc (Narval A100s) | ✅ closed |
+| #3 | Persistent GPU tensor storage (eliminate CPU↔GPU transfer overhead) | open |
+| #5 | Peer-to-peer work stealing (remove coordinator bottleneck) | open |
+| #6 | Heterogeneous CPU+GPU scheduling | open |
+| #7 | Multi-cluster benchmarks (Fir H100s, Rorqual) | open |
 
 ---
 

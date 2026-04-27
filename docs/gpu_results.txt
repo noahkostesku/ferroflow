@@ -1,0 +1,12 @@
+=== CPU baseline - 2048x2048 ===
+130 ops (2 sources, 128 compute), 256 edges
+  matmul: 128
+[run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 5101.2 ms  25 ops/s  idle=27.9%  steals=2.4/s  threshold=4
+=== GPU A100 - 2048x2048 ===
+130 ops (2 sources, 128 compute), 256 edges
+  matmul: 128
+[run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 2049.0 ms  62 ops/s  idle=38.8%  steals=4.9/s  threshold=4
+=== GPU A100 - 4096x4096 ===
+66 ops (2 sources, 64 compute), 128 edges
+  matmul: 64
+[run] work-stealing/matmul-parallel(8x8,m=4096) (8w): 3689.1 ms  17 ops/s  idle=42.1%  steals=1.6/s  threshold=1

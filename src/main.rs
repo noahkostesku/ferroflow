@@ -5,9 +5,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use ferroflow_core::{
-    gen_imbalanced, gen_large_transformer, gen_large_wide, gen_resnet_block, gen_transformer_block,
-    gen_wide_dag, gen_xlarge_transformer, gen_xlarge_wide, Dag, Device, Op, OpKind, RunMetrics,
-    SchedulerMetrics, Tensor,
+    gen_imbalanced, gen_large_transformer, gen_large_wide, gen_matmul_chain, gen_matmul_parallel,
+    gen_resnet_block, gen_transformer_block, gen_wide_dag, gen_xlarge_transformer, gen_xlarge_wide,
+    Dag, Device, Op, OpKind, RunMetrics, SchedulerMetrics, Tensor,
 };
 use ferroflow_onnx::{dag_summary, load_model};
 use ferroflow_runtime::{SequentialExecutor, StaticScheduler, WorkStealingScheduler};
@@ -43,6 +43,12 @@ enum SyntheticDag {
     /// Extra-large stacked transformer (≥545 ops at layers=32 d_model=512 n_heads=8).
     #[value(name = "xlarge-transformer")]
     XlargeTransformer,
+    /// Sequential chain of pure matmul ops (default: n_ops=50, matrix_size=512).
+    #[value(name = "matmul-chain")]
+    MatmulChain,
+    /// Parallel matmul branches (default: n_branches=32, ops_per_branch=4, matrix_size=256).
+    #[value(name = "matmul-parallel")]
+    MatmulParallel,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -126,6 +132,15 @@ enum Command {
         n_short_ops: usize,
         #[arg(long, default_value = "10")]
         slow_factor: u64,
+        // Matmul params
+        #[arg(long, default_value = "512")]
+        matrix_size: usize,
+        #[arg(long, default_value = "50")]
+        n_ops: usize,
+        #[arg(long, default_value = "32")]
+        n_branches: usize,
+        #[arg(long, default_value = "4")]
+        ops_per_branch: usize,
     },
 
     /// Execute a DAG with the selected scheduler and print RunMetrics.
@@ -182,6 +197,15 @@ enum Command {
         n_short_ops: usize,
         #[arg(long, default_value = "10")]
         slow_factor: u64,
+        // Matmul params
+        #[arg(long, default_value = "512")]
+        matrix_size: usize,
+        #[arg(long, default_value = "50")]
+        n_ops: usize,
+        #[arg(long, default_value = "32")]
+        n_branches: usize,
+        #[arg(long, default_value = "4")]
+        ops_per_branch: usize,
     },
 
     /// Run the MPI distributed scheduler across all MPI ranks.
@@ -258,6 +282,10 @@ struct SyntheticDagParams {
     chain_depth: usize,
     n_short_ops: usize,
     slow_factor: u64,
+    matrix_size: usize,
+    n_ops: usize,
+    n_branches: usize,
+    ops_per_branch: usize,
 }
 
 // ── local DAG builders ────────────────────────────────────────────────────────
@@ -326,6 +354,8 @@ fn build_synthetic_dag(
         }
         SyntheticDag::XlargeWide => gen_xlarge_wide(p.width, p.depth, p.skew)?,
         SyntheticDag::XlargeTransformer => gen_xlarge_transformer(p.layers, p.d_model, p.n_heads)?,
+        SyntheticDag::MatmulChain => gen_matmul_chain(p.n_ops, p.matrix_size)?,
+        SyntheticDag::MatmulParallel => gen_matmul_parallel(p.n_branches, p.ops_per_branch, p.matrix_size)?,
     };
     Ok((Arc::new(dag), src))
 }
@@ -664,6 +694,7 @@ async fn run_model(
                     | SyntheticDag::LargeWide
                     | SyntheticDag::XlargeWide
                     | SyntheticDag::Imbalanced
+                    | SyntheticDag::MatmulParallel
             );
             let lbl = match kind {
                 SyntheticDag::Transformer => "transformer".to_string(),
@@ -686,6 +717,15 @@ async fn run_model(
                 }
                 SyntheticDag::XlargeTransformer => {
                     format!("xlarge-transformer({}L,d={},h={})", p.layers, p.d_model, p.n_heads)
+                }
+                SyntheticDag::MatmulChain => {
+                    format!("matmul-chain({}ops,m={})", p.n_ops, p.matrix_size)
+                }
+                SyntheticDag::MatmulParallel => {
+                    format!(
+                        "matmul-parallel({}x{},m={})",
+                        p.n_branches, p.ops_per_branch, p.matrix_size
+                    )
                 }
             };
             println!("{}", synthetic_dag_summary(&arc));
@@ -786,6 +826,10 @@ async fn main() -> Result<()> {
             chain_depth,
             n_short_ops,
             slow_factor,
+            matrix_size,
+            n_ops,
+            n_branches,
+            ops_per_branch,
         } => {
             let p = SyntheticDagParams {
                 seq_len,
@@ -800,6 +844,10 @@ async fn main() -> Result<()> {
                 chain_depth,
                 n_short_ops,
                 slow_factor,
+                matrix_size,
+                n_ops,
+                n_branches,
+                ops_per_branch,
             };
             run_info(model.as_ref(), dag.as_ref(), &p)?;
         }
@@ -824,6 +872,10 @@ async fn main() -> Result<()> {
             chain_depth,
             n_short_ops,
             slow_factor,
+            matrix_size,
+            n_ops,
+            n_branches,
+            ops_per_branch,
         } => {
             let device = Device::from_str(&device_str)
                 .with_context(|| format!("invalid --device value: {device_str:?}"))?;
@@ -840,6 +892,10 @@ async fn main() -> Result<()> {
                 chain_depth,
                 n_short_ops,
                 slow_factor,
+                matrix_size,
+                n_ops,
+                n_branches,
+                ops_per_branch,
             };
             run_model(
                 model.as_ref(),
