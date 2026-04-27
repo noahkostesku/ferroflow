@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use ferroflow_core::{
     gen_imbalanced, gen_large_transformer, gen_large_wide, gen_resnet_block, gen_transformer_block,
-    gen_wide_dag, gen_xlarge_transformer, gen_xlarge_wide, Dag, Op, OpKind, RunMetrics,
+    gen_wide_dag, gen_xlarge_transformer, gen_xlarge_wide, Dag, Device, Op, OpKind, RunMetrics,
     SchedulerMetrics, Tensor,
 };
 use ferroflow_onnx::{dag_summary, load_model};
@@ -147,6 +147,9 @@ enum Command {
         /// Minimum victim queue depth before work-stealing is allowed (work-stealing only).
         #[arg(long, default_value = "2")]
         steal_threshold: usize,
+        /// Compute device: "cpu" (default) or "cuda" / "cuda:N" (requires --features cuda).
+        #[arg(long, default_value = "cpu")]
+        device: String,
         // Transformer params
         #[arg(long, default_value = "64")]
         seq_len: usize,
@@ -639,6 +642,7 @@ async fn run_model(
     workers: usize,
     scheduler: OnnxScheduler,
     steal_threshold: usize,
+    device: Device,
     p: &SyntheticDagParams,
 ) -> Result<()> {
     let (arc_dag, sources, is_skew, label) = match (model, dag) {
@@ -695,7 +699,7 @@ async fn run_model(
             ("sequential", m)
         }
         OnnxScheduler::Static => {
-            let sched = StaticScheduler::new(&arc_dag, workers);
+            let sched = StaticScheduler::new(&arc_dag, workers).with_device(device);
             let (_, m) = sched
                 .execute(std::sync::Arc::clone(&arc_dag), sources)
                 .await
@@ -703,7 +707,9 @@ async fn run_model(
             ("static", m)
         }
         OnnxScheduler::WorkStealing => {
-            let sched = WorkStealingScheduler::new(workers).with_steal_threshold(steal_threshold);
+            let sched = WorkStealingScheduler::new(workers)
+                .with_steal_threshold(steal_threshold)
+                .with_device(device);
             let (_, m) = sched
                 .execute(std::sync::Arc::clone(&arc_dag), sources)
                 .await
@@ -797,6 +803,7 @@ async fn main() -> Result<()> {
             workers,
             scheduler,
             steal_threshold,
+            device: device_str,
             seq_len,
             d_model,
             n_heads,
@@ -810,6 +817,8 @@ async fn main() -> Result<()> {
             n_short_ops,
             slow_factor,
         } => {
+            let device = Device::from_str(&device_str)
+                .with_context(|| format!("invalid --device value: {device_str:?}"))?;
             let p = SyntheticDagParams {
                 seq_len,
                 d_model,
@@ -830,6 +839,7 @@ async fn main() -> Result<()> {
                 workers,
                 scheduler,
                 steal_threshold,
+                device,
                 &p,
             )
             .await?;

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use ferroflow_core::{ops::execute_op, Dag, DagError, OpError, OpId, SchedulerMetrics, Tensor};
+use ferroflow_core::{ops::execute_op, Dag, DagError, Device, OpError, OpId, SchedulerMetrics, Tensor};
 use thiserror::Error;
 
 /// Errors returned by [`SequentialExecutor::execute`].
@@ -84,7 +84,7 @@ impl SequentialExecutor {
                 .collect::<Result<_, _>>()?;
 
             let op_name = op_kind_name(&op.kind);
-            let output = execute_op(op, &inputs).map_err(|source| ExecutorError::OpFailed {
+            let output = execute_op(op, &inputs, &Device::Cpu).map_err(|source| ExecutorError::OpFailed {
                 op_id,
                 op_name,
                 source,
@@ -142,7 +142,7 @@ mod tests {
 
         let (results, _) = SequentialExecutor::execute(&dag, sources).unwrap();
 
-        let out: Vec<f32> = results[&3].data.iter().copied().collect();
+        let out: Vec<f32> = results[&3].cpu_array().unwrap().iter().copied().collect();
         assert!(
             out.iter().all(|&v| v >= 0.0),
             "relu output must be non-negative: {out:?}"
@@ -179,7 +179,7 @@ mod tests {
         );
 
         let (results, _) = SequentialExecutor::execute(&dag, sources).unwrap();
-        let flat: Vec<f32> = results[&2].data.iter().copied().collect();
+        let flat: Vec<f32> = results[&2].cpu_array().unwrap().iter().copied().collect();
         assert_eq!(flat, vec![1., 2., 3., 4.]);
     }
 

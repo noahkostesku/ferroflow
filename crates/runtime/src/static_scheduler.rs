@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use ferroflow_core::{ops::execute_op, Dag, DagError, OpError, OpId, SchedulerMetrics, Tensor};
+use ferroflow_core::{ops::execute_op, Dag, DagError, Device, OpError, OpId, SchedulerMetrics, Tensor};
 use thiserror::Error;
 use tokio::sync::{watch, Mutex};
 
@@ -36,6 +36,7 @@ pub struct StaticScheduler {
     n_workers: usize,
     /// `assignments[w]` — op IDs assigned to worker `w`, in op-ID order.
     assignments: Vec<Vec<OpId>>,
+    device: Device,
 }
 
 impl StaticScheduler {
@@ -54,7 +55,14 @@ impl StaticScheduler {
         Self {
             n_workers,
             assignments,
+            device: Device::Cpu,
         }
+    }
+
+    /// Sets the compute device used for all ops and returns `self`.
+    pub fn with_device(mut self, device: Device) -> Self {
+        self.device = device;
+        self
     }
 
     /// Executes `dag` with `n_workers` concurrent tokio tasks.
@@ -90,6 +98,7 @@ impl StaticScheduler {
             let store = Arc::clone(&store);
             let version_tx = Arc::clone(&version_tx);
             let mut version_rx = version_rx.clone();
+            let device = self.device.clone();
 
             // Task returns idle microseconds accumulated by this worker.
             handles.push(tokio::spawn(async move {
@@ -123,7 +132,7 @@ impl StaticScheduler {
                         op.input_ids.iter().map(|dep| s[dep].clone()).collect()
                     };
                     let input_refs: Vec<&Tensor> = inputs.iter().collect();
-                    let result = execute_op(op, &input_refs)
+                    let result = execute_op(op, &input_refs, &device)
                         .map_err(|source| SchedulerError::OpFailed { op_id, source })?;
 
                     {
@@ -177,7 +186,7 @@ mod tests {
         );
 
         let (results, metrics) = sched.execute(dag, sources).await.unwrap();
-        let out: Vec<f32> = results[&3].data.iter().copied().collect();
+        let out: Vec<f32> = results[&3].cpu_array().unwrap().iter().copied().collect();
         assert!(out.iter().all(|&v| v >= 0.0));
         assert_eq!(out[3], 2.0);
         assert_eq!(metrics.total_ops, 3);
@@ -203,7 +212,7 @@ mod tests {
         let (results, _) = sched.execute(dag, sources).await.unwrap();
         assert_eq!(results.len(), 5);
         for id in 1..=4 {
-            let out: Vec<f32> = results[&id].data.iter().copied().collect();
+            let out: Vec<f32> = results[&id].cpu_array().unwrap().iter().copied().collect();
             assert_eq!(out, vec![1.0, 1.0, 1.0, 1.0]);
         }
     }
@@ -237,7 +246,7 @@ mod tests {
         );
 
         let (results, _) = sched.execute(dag, sources).await.unwrap();
-        let flat: Vec<f32> = results[&2].data.iter().copied().collect();
+        let flat: Vec<f32> = results[&2].cpu_array().unwrap().iter().copied().collect();
         assert_eq!(flat, vec![1., 2., 3., 4.]);
     }
 }

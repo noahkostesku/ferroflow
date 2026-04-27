@@ -104,7 +104,7 @@ fn run(dag: PyRef<'_, PyDag>, workers: usize) -> PyResult<HashMap<u32, Vec<f32>>
 
     Ok(results
         .into_iter()
-        .map(|(id, tensor)| (id as u32, tensor.data.iter().copied().collect()))
+        .map(|(id, tensor)| (id as u32, tensor.cpu_array().unwrap().iter().copied().collect()))
         .collect())
 }
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ferroflow_core::{
-    ops::execute_op, Dag, LiveMetrics, OpId, SchedulerMetrics, Tensor, WorkerLiveSnapshot,
+    ops::execute_op, Dag, Device, LiveMetrics, OpId, SchedulerMetrics, Tensor, WorkerLiveSnapshot,
     WorkerLiveStatus,
 };
 use tokio::sync::{watch, Mutex};
@@ -33,16 +33,18 @@ pub type WorkStealingError = SchedulerError;
 pub struct WorkStealingScheduler {
     n_workers: usize,
     steal_threshold: usize,
+    device: Device,
 }
 
 impl WorkStealingScheduler {
-    /// Creates a new `WorkStealingScheduler` with `n_workers` concurrent workers
-    /// and the default steal threshold of 2.
+    /// Creates a new `WorkStealingScheduler` with `n_workers` concurrent workers,
+    /// the default steal threshold of 2, and [`Device::Cpu`].
     pub fn new(n_workers: usize) -> Self {
         assert!(n_workers > 0, "n_workers must be at least 1");
         Self {
             n_workers,
             steal_threshold: DEFAULT_STEAL_THRESHOLD,
+            device: Device::Cpu,
         }
     }
 
@@ -50,6 +52,12 @@ impl WorkStealingScheduler {
     /// allowed) and returns `self`.
     pub fn with_steal_threshold(mut self, threshold: usize) -> Self {
         self.steal_threshold = threshold;
+        self
+    }
+
+    /// Sets the compute device used for all ops and returns `self`.
+    pub fn with_device(mut self, device: Device) -> Self {
+        self.device = device;
         self
     }
 
@@ -197,6 +205,7 @@ impl WorkStealingScheduler {
             let worker_ops = Arc::clone(&worker_ops);
             let worker_status = Arc::clone(&worker_status);
             let worker_idle_us = Arc::clone(&worker_idle_us);
+            let device = self.device.clone();
 
             handles.push(tokio::spawn(async move {
                 let mut attempt = 0usize;
@@ -281,7 +290,7 @@ impl WorkStealingScheduler {
                         op.input_ids.iter().map(|dep| s[dep].clone()).collect()
                     };
                     let input_refs: Vec<&Tensor> = inputs.iter().collect();
-                    let result = execute_op(op, &input_refs)
+                    let result = execute_op(op, &input_refs, &device)
                         .map_err(|source| SchedulerError::OpFailed { op_id, source })?;
 
                     store.lock().await.insert(op_id, result);
@@ -346,7 +355,7 @@ mod tests {
         );
 
         let (results, metrics) = sched.execute(dag, sources).await.unwrap();
-        let out: Vec<f32> = results[&3].data.iter().copied().collect();
+        let out: Vec<f32> = results[&3].cpu_array().unwrap().iter().copied().collect();
         assert!(out.iter().all(|&v| v >= 0.0));
         assert_eq!(out[3], 2.0);
         assert_eq!(metrics.total_ops, 3);
@@ -398,7 +407,7 @@ mod tests {
         );
 
         let (results, _) = sched.execute(dag, sources).await.unwrap();
-        let flat: Vec<f32> = results[&2].data.iter().copied().collect();
+        let flat: Vec<f32> = results[&2].cpu_array().unwrap().iter().copied().collect();
         assert_eq!(flat, vec![1., 2., 3., 4.]);
     }
 

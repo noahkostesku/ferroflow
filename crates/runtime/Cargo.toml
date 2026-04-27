@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 distributed = ["ferroflow-core/distributed", "dep:mpi"]
+cuda = ["ferroflow-core/cuda"]
 
 [dependencies]
 ferroflow-core = { workspace = true }
