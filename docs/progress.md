@@ -2,7 +2,7 @@
 
 > Check this file at the start of every session to orient on current status.
 
-Last updated: 2026-04-24 (Week 7 Session 1)
+Last updated: 2026-04-27 (Week 7 Session 2)
 
 ---
 
@@ -55,6 +55,7 @@ _Target: 2026-05-04_
 - [ ] Run static vs. work-stealing on 4, 8, 16, 32 nodes (balanced DAG) — pending Narval `sbatch slurm/scaling.sh`
 - [ ] Run static vs. work-stealing on 4, 8, 16, 32 nodes (skewed DAG) — pending Narval `sbatch slurm/scaling.sh`
 - [ ] Profile coordinator bottleneck (is it the bottleneck at 32+ nodes?)
+- [x] **Issue #5 — adaptive steal threshold:** `StealHistory` (20-sample window), `adaptive_threshold` fn (base = max(1,n/8), clamp = [1,max(4,n/4)], updates every 10 attempts), per-worker local state (no locks), `--no-adaptive-threshold` CLI flag, `threshold_final` + `threshold_adjustments` in `SchedulerMetrics`. Local 8w: adaptive ties fixed=1 on imbalanced, marginally beats fixed=2 on xlarge-wide. Adaptive is new default. Issue closed.
 - [ ] Tune backoff strategy in worker steal loop
 - [ ] Tune rayon thread pool size vs. `$SLURM_CPUS_PER_TASK`
 - [ ] Run 64-node and 128-node scaling experiments
@@ -108,3 +109,4 @@ _Target: 2026-04-17_
 - **2026-04-17:** Week 4 Session 1. PyO3 bindings in `crates/python` (new workspace member). `#[pyclass(name = "DAG")]` wraps a `Vec<Op>` builder; `matmul`/`relu`/`layer_norm`/`reduce` each append an `Op` and return its `u32` ID. `run(dag, workers)` constructs the `Dag`, pre-populates source tensors, and blocks a new `tokio::Runtime` on `WorkStealingScheduler::execute`. `pyproject.toml` uses maturin 1.x. `maturin develop` + `python ferroflow/examples/simple_mlp.py` verified — 33/33 tests pass.
 - **2026-04-24:** Week 7 Session 1. GitHub Issue #4: additional ONNX op support. Added `OpKind::Softmax`, `OpKind::BatchNorm { epsilon }`, `OpKind::Conv2d { kernel_size, stride, padding }` to `crates/core/src/op.rs`. Implemented all three in `crates/core/src/ops.rs`: softmax uses numerically-stable max-subtraction along last axis; batch_norm is inference-mode only with per-channel broadcast for [N,C,H,W] and [N,C] inputs; conv2d uses im2col + explicit GEMM (loops with comment — correctness over cleverness). Wired `Softmax`, `BatchNormalization` (with epsilon attribute), and `Conv` (kernel_shape/strides/pads attrs, dilation≠1 errors) into `crates/onnx/src/lib.rs`. Fixed exhaustive match in `crates/runtime/src/executor.rs` and `src/main.rs`. Added 9 unit tests (3 per op). Updated README supported ops table. Added `scripts/export_resnet.py`. 76/76 tests pass.
 - **2026-04-18:** Week 6 Session 2. Code quality + CI pass. Fixed all clippy warnings (`manual_is_multiple_of`, `too_many_arguments` via `SyntheticDagParams` struct, `if_same_then_else` in python crate). Replaced all `.unwrap()`/`.expect()` in library code with proper `?` propagation; added `WorkerPanicked` and `Internal` variants to `SchedulerError` and `ExecutorError`. `cargo doc --no-deps` emits zero warnings. Created `.github/workflows/ci.yml` (test/clippy/fmt jobs, `release/*` + `main` triggers). CI badge already present in README. 63/63 tests pass locally.
+- **2026-04-27:** Week 7 Session 2. Issue #5: adaptive steal threshold. `StealHistory` (20-sample sliding window, optimistic start 1.0, `record`/`success_rate`/`reset`) in `work_stealing.rs`. `adaptive_threshold(current, history, n_workers)` fn: base=max(1,n/8), rate>0.7→decrease by 1, rate<0.3→increase by 2, rate 0.3–0.7→keep, clamp [1, max(4,n/4)], updates every 10 steal attempts. Per-worker local state (no locks, no shared mutable state). Added `threshold_final: usize` + `threshold_adjustments: u64` to `SchedulerMetrics` (serde default=0 for backward compat). `WorkStealingScheduler::with_adaptive_threshold(bool)` builder; `--no-adaptive-threshold` CLI flag; `[run]` output now shows `threshold=N`. Local 8w benchmark: adaptive ties/margially beats fixed=2 (prior hardcoded default). Issue #5 closed. 85/85 tests pass.

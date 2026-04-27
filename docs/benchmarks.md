@@ -262,3 +262,26 @@ _Full multi-node scaling results (4 / 8 / 16 / 32 nodes) pending Narval runs._
 |     2 |              900 |             1014 |         1.000 |    477.0/s |
 |     4 |              958 |             1013 |         0.500 |    218.6/s |
 |     8 |              988 |             1012 |         0.250 |     99.3/s |
+
+---
+
+### 2026-04-27 — Adaptive Steal Threshold (Issue #5, commit cpu-work-scheduler)
+
+- **Machine:** Apple M-series dev laptop (local, single node, no MPI)
+- **Workers:** 8 tokio tasks  |  **Rust:** 1.91 (local)
+- **Feature:** Per-worker self-tuning steal threshold based on 20-sample rolling window of steal success rate. Updates every 10 steal attempts. Base = max(1, n_workers/8); clamp = [1, max(4, n_workers/4)].
+
+| DAG         | Threshold  | Throughput  | Steal Rate | Adjustments |
+|-------------|------------|-------------|------------|-------------|
+| imbalanced  | fixed=1    | ~996 ops/s  | ~469/s     | —           |
+| imbalanced  | fixed=2    | ~989 ops/s  | ~446/s     | —           |
+| imbalanced  | adaptive   | ~986 ops/s  | ~461/s     | threshold→4 |
+| xlarge-wide | fixed=1    | ~6148 ops/s | ~31/s      | —           |
+| xlarge-wide | fixed=2    | ~6153 ops/s | ~14/s      | —           |
+| xlarge-wide | adaptive   | ~6215 ops/s | ~34/s      | threshold→4 |
+
+**Result:** Adaptive threshold **ties or marginally outperforms** fixed alternatives on both DAGs within run-to-run noise (±20 ops/s). With n_workers=8, base threshold = max(1, 8/8) = 1; the adaptive threshold converges to 4 (the upper clamp = max(4, 8/4)) as end-of-job drain produces failed steals. During bulk execution it behaves identically to fixed=1.
+
+**Design note — local vs. Narval behaviour:** The adaptive benefit scales with worker count. At 32 workers (Narval, 1 node): base = max(1, 32/8) = 4, upper clamp = max(4, 32/4) = 8. High steal success rate (plenty of imbalance) drives threshold down to 1; low rate (balanced work, futile steals) raises threshold to 6–8, eliminating the wasted scan. That dynamic does not manifest locally at 8 workers where base=1 already covers the aggressive case.
+
+**Issue #5 outcome:** Adaptive beats fixed=2 (the prior hardcoded default) on xlarge-wide (6215 vs 6153 ops/s, +1%) and ties on imbalanced. Closing Issue #5 — adaptive is the new default and the infrastructure is in place for Narval-scale tuning.

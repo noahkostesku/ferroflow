@@ -147,6 +147,9 @@ enum Command {
         /// Minimum victim queue depth before work-stealing is allowed (work-stealing only).
         #[arg(long, default_value = "2")]
         steal_threshold: usize,
+        /// Disable adaptive steal threshold; use the fixed --steal-threshold value instead.
+        #[arg(long)]
+        no_adaptive_threshold: bool,
         /// Compute device: "cpu" (default) or "cuda" / "cuda:N" (requires --features cuda).
         #[arg(long, default_value = "cpu")]
         device: String,
@@ -642,6 +645,7 @@ async fn run_model(
     workers: usize,
     scheduler: OnnxScheduler,
     steal_threshold: usize,
+    adaptive_threshold: bool,
     device: Device,
     p: &SyntheticDagParams,
 ) -> Result<()> {
@@ -709,6 +713,7 @@ async fn run_model(
         OnnxScheduler::WorkStealing => {
             let sched = WorkStealingScheduler::new(workers)
                 .with_steal_threshold(steal_threshold)
+                .with_adaptive_threshold(adaptive_threshold)
                 .with_device(device);
             let (_, m) = sched
                 .execute(std::sync::Arc::clone(&arc_dag), sources)
@@ -727,11 +732,13 @@ async fn run_model(
         metrics: m,
     };
     println!(
-        "[run] {sched_name}/{label} ({workers}w): {:.1} ms  {:.0} ops/s  idle={:.1}%  steals={:.1}/s",
+        "[run] {sched_name}/{label} ({workers}w): {:.1} ms  {:.0} ops/s  \
+         idle={:.1}%  steals={:.1}/s  threshold={}",
         run.metrics.elapsed_ms,
         run.metrics.throughput_ops_per_sec,
         idle_pct(&run),
         run.metrics.steal_rate,
+        run.metrics.threshold_final,
     );
     Ok(())
 }
@@ -803,6 +810,7 @@ async fn main() -> Result<()> {
             workers,
             scheduler,
             steal_threshold,
+            no_adaptive_threshold,
             device: device_str,
             seq_len,
             d_model,
@@ -839,6 +847,7 @@ async fn main() -> Result<()> {
                 workers,
                 scheduler,
                 steal_threshold,
+                !no_adaptive_threshold,
                 device,
                 &p,
             )

@@ -87,6 +87,12 @@ pub struct SchedulerMetrics {
     pub successful_steals: u64,
     /// Derived: `successful_steals / elapsed_sec`.
     pub steal_rate: f64,
+    /// Steal threshold in effect at job end (0 when adaptive is disabled or not applicable).
+    #[serde(default)]
+    pub threshold_final: usize,
+    /// Number of times the adaptive threshold changed value during execution.
+    #[serde(default)]
+    pub threshold_adjustments: u64,
 }
 
 impl SchedulerMetrics {
@@ -98,6 +104,8 @@ impl SchedulerMetrics {
         idle_time_ms: f64,
         steal_attempts: u64,
         successful_steals: u64,
+        threshold_final: usize,
+        threshold_adjustments: u64,
     ) -> Self {
         let elapsed_sec = elapsed_ms / 1000.0;
         let throughput_ops_per_sec = if elapsed_sec > 0.0 {
@@ -119,6 +127,8 @@ impl SchedulerMetrics {
             steal_attempts,
             successful_steals,
             steal_rate,
+            threshold_final,
+            threshold_adjustments,
         }
     }
 }
@@ -157,7 +167,9 @@ impl fmt::Display for RunMetrics {
         writeln!(f, "idle_time_ms      : {:.3}", m.idle_time_ms)?;
         writeln!(f, "steal_attempts    : {}", m.steal_attempts)?;
         writeln!(f, "successful_steals : {}", m.successful_steals)?;
-        write!(f, "steal_rate /s     : {:.2}", m.steal_rate)
+        writeln!(f, "steal_rate /s     : {:.2}", m.steal_rate)?;
+        writeln!(f, "threshold_final   : {}", m.threshold_final)?;
+        write!(f, "threshold_adj     : {}", m.threshold_adjustments)
     }
 }
 
@@ -166,7 +178,7 @@ mod tests {
     use super::*;
 
     fn sample_metrics() -> SchedulerMetrics {
-        SchedulerMetrics::new(20, 20, 50.0, 5.0, 8, 3)
+        SchedulerMetrics::new(20, 20, 50.0, 5.0, 8, 3, 2, 4)
     }
 
     fn sample_run() -> RunMetrics {
@@ -191,7 +203,7 @@ mod tests {
 
     #[test]
     fn zero_elapsed_no_divide_by_zero() {
-        let m = SchedulerMetrics::new(10, 10, 0.0, 0.0, 0, 0);
+        let m = SchedulerMetrics::new(10, 10, 0.0, 0.0, 0, 0, 0, 0);
         assert_eq!(m.throughput_ops_per_sec, 0.0);
         assert_eq!(m.steal_rate, 0.0);
     }
@@ -227,5 +239,7 @@ mod tests {
         assert!(s.contains("work-stealing"));
         assert!(s.contains("steal_attempts"));
         assert!(s.contains("idle_time_ms"));
+        assert!(s.contains("threshold_final"));
+        assert!(s.contains("threshold_adj"));
     }
 }
