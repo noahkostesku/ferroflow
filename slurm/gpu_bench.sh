@@ -1,7 +1,7 @@
 #!/bin/bash
-# GPU benchmark: CPU baseline vs A100 GPU for matmul-heavy DAGs and ResNet-18.
-# Runs both work-stealing schedulers on the imbalanced synthetic DAG and the
-# ResNet-18 ONNX model, recording throughput in docs/gpu_results.txt.
+# GPU benchmark: CPU baseline vs A100 GPU for pure matmul DAGs.
+# Uses matmul-parallel to guarantee real compute ops with no Slow placeholders,
+# so the A100 has actual matmuls to accelerate.
 
 #SBATCH --job-name=ferroflow-gpu
 #SBATCH --account=def-cbravo
@@ -31,24 +31,27 @@ mkdir -p "$(dirname "${RESULTS}")"
 echo "" | tee -a "${RESULTS}"
 echo "=== CPU baseline (job ${SLURM_JOB_ID}) ===" | tee -a "${RESULTS}"
 
-"${BINARY}" run --dag imbalanced --workers "${SLURM_CPUS_PER_TASK}" \
-    --scheduler work-stealing --device cpu \
-    | tee -a "${RESULTS}"
-
-"${BINARY}" run --model models/resnet18.onnx --workers "${SLURM_CPUS_PER_TASK}" \
-    --scheduler work-stealing --device cpu \
+"${BINARY}" run --dag matmul-parallel \
+    --n-branches 32 --ops-per-branch 4 --matrix-size 256 \
+    --workers 8 --scheduler work-stealing --device cpu \
     | tee -a "${RESULTS}"
 
 # ── GPU (A100) ────────────────────────────────────────────────────────────────
 echo "" | tee -a "${RESULTS}"
 echo "=== GPU A100 (job ${SLURM_JOB_ID}) ===" | tee -a "${RESULTS}"
 
-"${BINARY}" run --dag imbalanced --workers "${SLURM_CPUS_PER_TASK}" \
-    --scheduler work-stealing --device cuda \
+"${BINARY}" run --dag matmul-parallel \
+    --n-branches 32 --ops-per-branch 4 --matrix-size 256 \
+    --workers 8 --scheduler work-stealing --device cuda \
     | tee -a "${RESULTS}"
 
-"${BINARY}" run --model models/resnet18.onnx --workers "${SLURM_CPUS_PER_TASK}" \
-    --scheduler work-stealing --device cuda \
+# ── GPU A100 larger matrices ──────────────────────────────────────────────────
+echo "" | tee -a "${RESULTS}"
+echo "=== GPU A100 larger matrices (job ${SLURM_JOB_ID}) ===" | tee -a "${RESULTS}"
+
+"${BINARY}" run --dag matmul-parallel \
+    --n-branches 16 --ops-per-branch 4 --matrix-size 512 \
+    --workers 8 --scheduler work-stealing --device cuda \
     | tee -a "${RESULTS}"
 
 echo "" | tee -a "${RESULTS}"

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use ferroflow_core::{ops::execute_op, Dag, Op, OpId, SchedulerMetrics, Tensor};
+use ferroflow_core::{ops::execute_op, Dag, Device, Op, OpId, SchedulerMetrics, Tensor};
 use mpi::traits::*;
 use serde::{Deserialize, Serialize};
 
@@ -306,7 +306,7 @@ fn worker_loop<C: Communicator>(
                     successful_steals += 1;
                 }
                 let input_refs: Vec<&Tensor> = inputs.iter().collect();
-                let tensor = execute_op(&op, &input_refs)
+                let tensor = execute_op(&op, &input_refs, &Device::Cpu)
                     .map_err(|e| anyhow::anyhow!("rank {rank}: op {op_id} failed: {e}"))?;
                 mpi_send(world, 0, &MpiMsg::OpResult { op_id, tensor })?;
             }

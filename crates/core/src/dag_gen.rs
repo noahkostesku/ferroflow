@@ -488,6 +488,104 @@ pub fn gen_imbalanced(
     Ok((dag, sources))
 }
 
+/// Generates a sequential chain of `n_ops` matrix-multiply operations.
+///
+/// Structure (`2 + n_ops` ops):
+/// - Op 0: source tensor A (`matrix_size × matrix_size`, no deps)
+/// - Op 1: weight tensor W (`matrix_size × matrix_size`, no deps)
+/// - Ops `2..2+n_ops`: matmul chain — op `i` computes `prev × W`, where `prev` is
+///   the output of op `i-1` (or A for the first op)
+///
+/// Every compute op is a real `Matmul`; there are zero `Slow` ops.
+/// All source tensors are initialised with `1/matrix_size`.
+///
+/// # Errors
+/// Returns [`DagError`] if DAG construction fails.
+pub fn gen_matmul_chain(
+    n_ops: usize,
+    matrix_size: usize,
+) -> Result<(Dag, HashMap<OpId, Tensor>), DagError> {
+    let m = matrix_size;
+    let val = 1.0 / m as f32;
+    let mut ops: Vec<Op> = Vec::with_capacity(2 + n_ops);
+
+    // Source A (op 0) and weight W (op 1)
+    ops.push(Op::new(0, OpKind::Relu { len: m * m }, vec![], vec![m, m]));
+    ops.push(Op::new(1, OpKind::Relu { len: m * m }, vec![], vec![m, m]));
+
+    for i in 0..n_ops {
+        let id = 2 + i;
+        let prev = if i == 0 { 0 } else { id - 1 };
+        ops.push(Op::new(
+            id,
+            OpKind::Matmul { m, n: m, k: m },
+            vec![prev, 1],
+            vec![m, m],
+        ));
+    }
+
+    let dag = Dag::new(ops)?;
+    let sources = HashMap::from([
+        (0usize, Tensor::full(&[m, m], val)),
+        (1usize, Tensor::full(&[m, m], val)),
+    ]);
+    Ok((dag, sources))
+}
+
+/// Generates a wide parallel DAG of `n_branches` independent matmul chains.
+///
+/// Structure (`2 + n_branches × ops_per_branch` ops):
+/// - Op 0: root fan-out source (`matrix_size × matrix_size`, no deps) — all branches
+///   depend on this as their first input
+/// - Op 1: shared weight W (`matrix_size × matrix_size`, no deps)
+/// - Branch `b`, step `d` at id `2 + b*ops_per_branch + d`:
+///   - `d == 0`: depends on `[0, 1]` (root and weight)
+///   - `d > 0`: depends on `[id-1, 1]` (prev in branch and weight)
+///
+/// All branches are independent of each other, maximising parallelism for
+/// work-stealing schedulers.  Every compute op is a real `Matmul`; there are
+/// zero `Slow` ops.
+///
+/// # Errors
+/// Returns [`DagError`] if DAG construction fails.
+pub fn gen_matmul_parallel(
+    n_branches: usize,
+    ops_per_branch: usize,
+    matrix_size: usize,
+) -> Result<(Dag, HashMap<OpId, Tensor>), DagError> {
+    let m = matrix_size;
+    let val = 1.0 / m as f32;
+    let mut ops: Vec<Op> = Vec::with_capacity(2 + n_branches * ops_per_branch);
+
+    // Root fan-out source (op 0) and shared weight (op 1)
+    ops.push(Op::new(0, OpKind::Relu { len: m * m }, vec![], vec![m, m]));
+    ops.push(Op::new(1, OpKind::Relu { len: m * m }, vec![], vec![m, m]));
+
+    for b in 0..n_branches {
+        for d in 0..ops_per_branch {
+            let id = 2 + b * ops_per_branch + d;
+            let inputs = if d == 0 {
+                vec![0, 1]
+            } else {
+                vec![id - 1, 1]
+            };
+            ops.push(Op::new(
+                id,
+                OpKind::Matmul { m, n: m, k: m },
+                inputs,
+                vec![m, m],
+            ));
+        }
+    }
+
+    let dag = Dag::new(ops)?;
+    let sources = HashMap::from([
+        (0usize, Tensor::full(&[m, m], val)),
+        (1usize, Tensor::full(&[m, m], val)),
+    ]);
+    Ok((dag, sources))
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -758,6 +856,93 @@ mod tests {
                 vec![0],
                 "short op {i} must depend only on root"
             );
+        }
+    }
+
+    #[test]
+    fn matmul_chain_op_count() {
+        let (dag, sources) = gen_matmul_chain(50, 64).unwrap();
+        assert_eq!(dag.len(), 2 + 50, "expected 52 ops");
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn matmul_chain_no_cycle() {
+        let (dag, _) = gen_matmul_chain(10, 32).unwrap();
+        assert_no_cycle(&dag);
+    }
+
+    #[test]
+    fn matmul_chain_all_compute_are_matmul() {
+        let (dag, _) = gen_matmul_chain(10, 32).unwrap();
+        let slow_count = dag
+            .ops
+            .iter()
+            .filter(|op| matches!(op.kind, OpKind::Slow { .. }))
+            .count();
+        assert_eq!(slow_count, 0, "no Slow ops in matmul-chain");
+        let matmul_count = dag
+            .ops
+            .iter()
+            .filter(|op| matches!(op.kind, OpKind::Matmul { .. }))
+            .count();
+        assert_eq!(matmul_count, 10, "all compute ops are Matmul");
+    }
+
+    #[test]
+    fn matmul_chain_is_sequential() {
+        let (dag, _) = gen_matmul_chain(5, 16).unwrap();
+        // Op 2 depends on [0, 1]; ops 3..6 each depend on [prev, 1]
+        assert_eq!(dag.ops[2].input_ids, vec![0, 1]);
+        for i in 3..7usize {
+            assert_eq!(dag.ops[i].input_ids, vec![i - 1, 1]);
+        }
+    }
+
+    #[test]
+    fn matmul_parallel_op_count() {
+        let (dag, sources) = gen_matmul_parallel(32, 4, 64).unwrap();
+        assert_eq!(dag.len(), 2 + 32 * 4, "expected 130 ops");
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn matmul_parallel_no_cycle() {
+        let (dag, _) = gen_matmul_parallel(8, 4, 32).unwrap();
+        assert_no_cycle(&dag);
+    }
+
+    #[test]
+    fn matmul_parallel_all_compute_are_matmul() {
+        let (dag, _) = gen_matmul_parallel(8, 4, 32).unwrap();
+        let slow_count = dag
+            .ops
+            .iter()
+            .filter(|op| matches!(op.kind, OpKind::Slow { .. }))
+            .count();
+        assert_eq!(slow_count, 0, "no Slow ops in matmul-parallel");
+        let matmul_count = dag
+            .ops
+            .iter()
+            .filter(|op| matches!(op.kind, OpKind::Matmul { .. }))
+            .count();
+        assert_eq!(matmul_count, 8 * 4, "all compute ops are Matmul");
+    }
+
+    #[test]
+    fn matmul_parallel_branches_independent() {
+        let n_branches = 4;
+        let ops_per_branch = 3;
+        let (dag, _) = gen_matmul_parallel(n_branches, ops_per_branch, 16).unwrap();
+        for b in 0..n_branches {
+            for d in 0..ops_per_branch {
+                let id = 2 + b * ops_per_branch + d;
+                if d == 0 {
+                    assert_eq!(dag.ops[id].input_ids, vec![0, 1]);
+                } else {
+                    assert_eq!(dag.ops[id].input_ids, vec![id - 1, 1]);
+                }
+            }
         }
     }
 
