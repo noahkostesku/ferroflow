@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ferroflow_core::{
-    ops::{execute_op, OpError},
-    Dag, Device, LiveMetrics, OpId, SchedulerMetrics, Tensor, TensorError, WorkerLiveSnapshot,
-    WorkerLiveStatus,
+    gpu_available,
+    ops::{execute_op_auto, OpError},
+    Dag, Device, DevicePolicy, LiveMetrics, OpId, SchedulerMetrics, Tensor, TensorError,
+    WorkerLiveSnapshot, WorkerLiveStatus,
 };
 use tokio::sync::{watch, Mutex};
 
@@ -115,23 +116,27 @@ impl DeviceStrategy {
 /// every [`ADAPTIVE_UPDATE_INTERVAL`] steal attempts based on its recent success
 /// rate — see [`adaptive_threshold`].  Failed steal attempts back off with a
 /// deterministic pseudo-random delay in the range 10–50 ms.
+///
+/// The device placement policy ([`DevicePolicy`]) controls where each op runs.
+/// Under [`DevicePolicy::Auto`] workers make independent per-op routing decisions
+/// without any global coordination.
 pub struct WorkStealingScheduler {
     n_workers: usize,
     steal_threshold: usize,
     adaptive: bool,
-    device: Device,
+    policy: DevicePolicy,
 }
 
 impl WorkStealingScheduler {
     /// Creates a new `WorkStealingScheduler` with `n_workers` concurrent workers,
-    /// adaptive threshold enabled, and [`Device::Cpu`].
+    /// adaptive threshold enabled, and [`DevicePolicy::AllCpu`].
     pub fn new(n_workers: usize) -> Self {
         assert!(n_workers > 0, "n_workers must be at least 1");
         Self {
             n_workers,
             steal_threshold: DEFAULT_STEAL_THRESHOLD,
             adaptive: true,
-            device: Device::Cpu,
+            policy: DevicePolicy::AllCpu,
         }
     }
 
@@ -149,18 +154,38 @@ impl WorkStealingScheduler {
         self
     }
 
+    /// Sets the per-op device placement policy and returns `self`.
+    ///
+    /// Under [`DevicePolicy::Auto`] each worker independently routes ops to the
+    /// optimal device without global coordination.
+    pub fn with_policy(mut self, policy: DevicePolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
     /// Sets the compute device used for all ops and returns `self`.
+    ///
+    /// Convenience bridge: converts `device` to the equivalent [`DevicePolicy`]
+    /// variant.  Prefer [`with_policy`](Self::with_policy) for new code.
     pub fn with_device(mut self, device: Device) -> Self {
-        self.device = device;
+        self.policy = match device {
+            Device::Cpu => DevicePolicy::AllCpu,
+            #[cfg(feature = "cuda")]
+            Device::Cuda(_) => DevicePolicy::AllGpu,
+        };
         self
     }
 
     /// Sets the device placement strategy and returns `self`.
     ///
-    /// Equivalent to [`with_device`](Self::with_device) but expressed via the
-    /// higher-level [`DeviceStrategy`] enum.
+    /// Convenience bridge for callers that still use the [`DeviceStrategy`] enum.
+    /// Prefer [`with_policy`](Self::with_policy) for new code.
     pub fn with_strategy(mut self, strategy: DeviceStrategy) -> Self {
-        self.device = strategy.device();
+        self.policy = match strategy {
+            DeviceStrategy::AllCpu => DevicePolicy::AllCpu,
+            #[cfg(feature = "cuda")]
+            DeviceStrategy::AllGpu => DevicePolicy::AllGpu,
+        };
         self
     }
 
@@ -221,6 +246,8 @@ impl WorkStealingScheduler {
         let threshold_adjustments = Arc::new(AtomicU64::new(0));
         // Stores the final threshold of any one worker — representative since all converge.
         let threshold_final = Arc::new(AtomicUsize::new(fixed_threshold));
+        let gpu_ops = Arc::new(AtomicU64::new(0));
+        let cpu_ops = Arc::new(AtomicU64::new(0));
 
         // Per-worker tracking for the live-metrics ticker.
         let worker_ops: Arc<Vec<AtomicU64>> = Arc::new((0..n).map(|_| AtomicU64::new(0)).collect());
@@ -314,7 +341,9 @@ impl WorkStealingScheduler {
             let worker_ops = Arc::clone(&worker_ops);
             let worker_status = Arc::clone(&worker_status);
             let worker_idle_us = Arc::clone(&worker_idle_us);
-            let device = self.device.clone();
+            let policy = self.policy.clone();
+            let gpu_ops = Arc::clone(&gpu_ops);
+            let cpu_ops = Arc::clone(&cpu_ops);
 
             handles.push(tokio::spawn(async move {
                 let mut attempt = 0usize;
@@ -418,11 +447,16 @@ impl WorkStealingScheduler {
                     let op = dag
                         .get_op(op_id)
                         .ok_or(SchedulerError::Internal("valid op id"))?;
+                    // Resolve the target device once — used for input transfer and
+                    // routing-metric tracking before the execute call.
+                    let gpu = gpu_available();
+                    let target_device = policy.device_for_op(op, gpu);
+                    let is_gpu_op = target_device != Device::Cpu;
                     let inputs: Vec<Tensor> = {
                         let s = store.lock().await;
                         op.input_ids
                             .iter()
-                            .map(|dep| s[dep].to_device_cached(&device))
+                            .map(|dep| s[dep].to_device_cached(&target_device))
                             .collect::<Result<Vec<_>, TensorError>>()
                             .map_err(|e| SchedulerError::OpFailed {
                                 op_id,
@@ -430,8 +464,13 @@ impl WorkStealingScheduler {
                             })?
                     };
                     let input_refs: Vec<&Tensor> = inputs.iter().collect();
-                    let result = execute_op(op, &input_refs, &device)
+                    let result = execute_op_auto(op, &input_refs, &policy)
                         .map_err(|source| SchedulerError::OpFailed { op_id, source })?;
+                    if is_gpu_op {
+                        gpu_ops.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        cpu_ops.fetch_add(1, Ordering::Relaxed);
+                    }
 
                     store.lock().await.insert(op_id, result);
                     worker_ops[worker_id].fetch_add(1, Ordering::Relaxed);
@@ -465,8 +504,20 @@ impl WorkStealingScheduler {
         let ss = successful_steals.load(Ordering::Relaxed);
         let ta = threshold_adjustments.load(Ordering::Relaxed);
         let tf = threshold_final.load(Ordering::Relaxed);
-        let metrics =
-            SchedulerMetrics::new(total_ops, total_ops, elapsed_ms, idle_time_ms, sa, ss, tf, ta);
+        let go = gpu_ops.load(Ordering::Relaxed);
+        let co = cpu_ops.load(Ordering::Relaxed);
+        let metrics = SchedulerMetrics::new(
+            total_ops,
+            total_ops,
+            elapsed_ms,
+            idle_time_ms,
+            sa,
+            ss,
+            tf,
+            ta,
+            go,
+            co,
+        );
 
         let store = Arc::try_unwrap(store)
             .map_err(|_| SchedulerError::Internal("all worker handles dropped"))?
