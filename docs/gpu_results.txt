@@ -10,3 +10,21 @@
 66 ops (2 sources, 64 compute), 128 edges
   matmul: 64
 [run] work-stealing/matmul-parallel(8x8,m=4096) (8w): 3689.1 ms  17 ops/s  idle=42.1%  steals=1.6/s  threshold=1
+
+----
+[gpu-bench] job 60016134 started: 2026-04-28T17:25:47-04:00
+[gpu-bench] node: ng31205
+[gpu-bench] GPU: NVIDIA A100-SXM4-40GB
+=== CPU baseline 2048x2048 ===
+130 ops (2 sources, 128 compute), 256 edges
+  matmul: 128
+[run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 5097.8 ms  25 ops/s  idle=28.2%  steals=1.8/s  threshold=4
+=== GPU A100 2048x2048 ===
+130 ops (2 sources, 128 compute), 256 edges
+  matmul: 128
+[run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 2727.4 ms  47 ops/s  idle=22.2%  steals=2.2/s  threshold=4
+=== GPU A100 4096x4096 ===
+66 ops (2 sources, 64 compute), 128 edges
+  matmul: 64
+[run] work-stealing/matmul-parallel(8x8,m=4096) (8w): 5210.9 ms  12 ops/s  idle=19.9%  steals=1.2/s  threshold=1
+[gpu-bench] finished: 2026-04-28T17:26:01-04:00
