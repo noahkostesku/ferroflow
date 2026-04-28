@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use ferroflow_core::{ops::execute_op, Dag, DagError, Device, OpError, OpId, SchedulerMetrics, Tensor};
+use ferroflow_core::{
+    ops::execute_op, Dag, DagError, Device, OpError, OpId, SchedulerMetrics, Tensor, TensorError,
+};
 use thiserror::Error;
 use tokio::sync::{watch, Mutex};
 
@@ -62,6 +64,18 @@ impl StaticScheduler {
     /// Sets the compute device used for all ops and returns `self`.
     pub fn with_device(mut self, device: Device) -> Self {
         self.device = device;
+        self
+    }
+
+    /// Sets the device placement strategy and returns `self`.
+    ///
+    /// Equivalent to [`with_device`](Self::with_device) but expressed via the
+    /// higher-level [`crate::work_stealing::DeviceStrategy`] enum.
+    pub fn with_strategy(
+        mut self,
+        strategy: crate::work_stealing::DeviceStrategy,
+    ) -> Self {
+        self.device = strategy.device();
         self
     }
 
@@ -129,7 +143,14 @@ impl StaticScheduler {
                         .ok_or(SchedulerError::Internal("valid op id"))?;
                     let inputs: Vec<Tensor> = {
                         let s = store.lock().await;
-                        op.input_ids.iter().map(|dep| s[dep].clone()).collect()
+                        op.input_ids
+                            .iter()
+                            .map(|dep| s[dep].to_device_cached(&device))
+                            .collect::<Result<Vec<_>, TensorError>>()
+                            .map_err(|e| SchedulerError::OpFailed {
+                                op_id,
+                                source: OpError::Tensor(e),
+                            })?
                     };
                     let input_refs: Vec<&Tensor> = inputs.iter().collect();
                     let result = execute_op(op, &input_refs, &device)

@@ -4,6 +4,8 @@ use thiserror::Error;
 use crate::device::Device;
 use crate::op::{Op, OpKind};
 use crate::tensor::Tensor;
+#[cfg(feature = "cuda")]
+use crate::tensor::TensorStorage;
 
 /// Errors produced when executing a single [`Op`].
 #[derive(Debug, Error)]
@@ -47,10 +49,13 @@ pub enum OpError {
 ///
 /// `tensors` must be ordered to match `op.input_ids`.
 ///
-/// When `device` is [`Device::Cuda`], only `Matmul` is accelerated; all other
-/// ops execute on the CPU.  The GPU path performs host-to-device and
-/// device-to-host copies around the kernel — per-op transfer overhead is a
-/// known limitation documented for v0.1.
+/// When `device` is [`Device::Cuda`], `Matmul` is accelerated via cuBLAS and
+/// returns a GPU tensor.  Inputs are transferred to the GPU only when not
+/// already resident there ([`Tensor::to_device_cached`]).  Non-matmul ops fall
+/// back to CPU — inputs are transferred to CPU if required.
+///
+/// For `Device::Cpu` the path is unchanged: inputs must be CPU tensors, and a
+/// CPU tensor is always returned.
 ///
 /// # Errors
 /// Returns [`OpError`] on shape or arity mismatches, or CUDA driver failures.
@@ -64,10 +69,21 @@ pub fn execute_op(op: &Op, tensors: &[&Tensor], device: &Device) -> Result<Tenso
             match &op.kind {
                 OpKind::Matmul { .. } => {
                     require_inputs("matmul", tensors, 2)?;
-                    matmul_cuda(tensors[0], tensors[1], &dev)
+                    // Transfer inputs to GPU only if not already there.
+                    let a = tensors[0].to_device_cached(device)?;
+                    let b = tensors[1].to_device_cached(device)?;
+                    matmul_cuda(&a, &b, &dev)
                 }
-                // All other ops run on the CPU in v0.1.
-                _ => execute_op_cpu(op, tensors),
+                // Non-matmul ops fall back to CPU; transfer GPU inputs to host if needed.
+                _ => {
+                    let cpu = &Device::Cpu;
+                    let owned: Vec<Tensor> = tensors
+                        .iter()
+                        .map(|t| t.to_device_cached(cpu))
+                        .collect::<Result<_, _>>()?;
+                    let refs: Vec<&Tensor> = owned.iter().collect();
+                    execute_op_cpu(op, &refs)
+                }
             }
         }
     }
@@ -138,9 +154,10 @@ fn execute_op_cpu(op: &Op, tensors: &[&Tensor]) -> Result<Tensor, OpError> {
 
 /// Runs matrix multiply on the GPU: `C = A · B`.
 ///
-/// Both inputs must be 2-D CPU tensors `[M, K]` and `[K, N]`.  The function
-/// copies them to the GPU, runs SGEMM via cuBLAS, copies the result back, and
-/// returns a CPU tensor `[M, N]`.
+/// Inputs may be 2-D CPU tensors `[M, K]` / `[K, N]` or GPU tensors already
+/// resident on `dev`.  CPU inputs are uploaded once; GPU inputs are used
+/// directly (no transfer).  The result is returned as a GPU tensor — the
+/// caller is responsible for transferring to CPU if needed.
 ///
 /// cuBLAS is column-major.  For row-major inputs we use the identity
 /// `C = A·B  ⟺  C^T = B^T · A^T` and swap operand order in `gemm`.
@@ -153,41 +170,48 @@ fn matmul_cuda(
     b: &Tensor,
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
 ) -> Result<Tensor, OpError> {
-    use cudarc::cublas::{CudaBlas, Gemm, GemmConfig};
+    use std::sync::Arc;
+
     use cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N;
+    use cudarc::cublas::{CudaBlas, Gemm, GemmConfig};
 
-    let a_arr = a.cpu_array()?;
-    let b_arr = b.cpu_array()?;
-
-    let a2 = a_arr.view().into_dimensionality::<Ix2>().map_err(|_| {
-        OpError::Dimensionality(format!(
+    // Validate shapes without requiring a CPU copy.
+    if a.shape().len() != 2 {
+        return Err(OpError::Dimensionality(format!(
             "matmul_cuda input A must be 2-D, got shape {:?}",
             a.shape()
-        ))
-    })?;
-    let b2 = b_arr.view().into_dimensionality::<Ix2>().map_err(|_| {
-        OpError::Dimensionality(format!(
+        )));
+    }
+    if b.shape().len() != 2 {
+        return Err(OpError::Dimensionality(format!(
             "matmul_cuda input B must be 2-D, got shape {:?}",
             b.shape()
-        ))
-    })?;
-
-    let (m, k) = (a2.nrows(), a2.ncols());
-    let (kb, n) = (b2.nrows(), b2.ncols());
-
+        )));
+    }
+    let (m, k) = (a.shape()[0], a.shape()[1]);
+    let (kb, n) = (b.shape()[0], b.shape()[1]);
     if k != kb {
         return Err(OpError::ShapeMismatch(format!(
             "matmul_cuda: A({m},{k}), B({kb},{n}) — inner dims must match"
         )));
     }
 
-    // Upload inputs (row-major flat order).
-    let a_gpu = dev
-        .htod_copy(a_arr.iter().copied().collect::<Vec<f32>>())
-        .map_err(|e| OpError::CudaDriver(e.to_string()))?;
-    let b_gpu = dev
-        .htod_copy(b_arr.iter().copied().collect::<Vec<f32>>())
-        .map_err(|e| OpError::CudaDriver(e.to_string()))?;
+    // Obtain GPU slices: reuse if already on device, upload from CPU otherwise.
+    let a_gpu: Arc<cudarc::driver::CudaSlice<f32>> = match &a.storage {
+        TensorStorage::Cuda(arc) => Arc::clone(arc),
+        TensorStorage::Cpu(arr) => Arc::new(
+            dev.htod_copy(arr.iter().copied().collect::<Vec<f32>>())
+                .map_err(|e| OpError::CudaDriver(e.to_string()))?,
+        ),
+    };
+    let b_gpu: Arc<cudarc::driver::CudaSlice<f32>> = match &b.storage {
+        TensorStorage::Cuda(arc) => Arc::clone(arc),
+        TensorStorage::Cpu(arr) => Arc::new(
+            dev.htod_copy(arr.iter().copied().collect::<Vec<f32>>())
+                .map_err(|e| OpError::CudaDriver(e.to_string()))?,
+        ),
+    };
+
     let mut c_gpu = dev
         .alloc_zeros::<f32>(m * n)
         .map_err(|e| OpError::CudaDriver(e.to_string()))?;
@@ -209,14 +233,14 @@ fn matmul_cuda(
         ldc: n as i32,
     };
     // Safety: shapes are validated above; GPU buffers are correctly sized.
-    unsafe { blas.gemm(cfg, &b_gpu, &a_gpu, &mut c_gpu) }
+    unsafe { blas.gemm(cfg, &*b_gpu, &*a_gpu, &mut c_gpu) }
         .map_err(|e| OpError::CudaBlas(e.to_string()))?;
 
-    // Download result and wrap as CPU tensor.
-    let c_flat = dev
-        .dtoh_sync_copy(&c_gpu)
-        .map_err(|e| OpError::CudaDriver(e.to_string()))?;
-    Tensor::from_shape_vec(&[m, n], c_flat).map_err(|e| OpError::ShapeMismatch(e.to_string()))
+    // Return GPU tensor — caller transfers to CPU if needed.
+    Ok(Tensor {
+        storage: TensorStorage::Cuda(Arc::new(c_gpu)),
+        shape: vec![m, n],
+    })
 }
 
 // ── private CPU helpers ───────────────────────────────────────────────────────

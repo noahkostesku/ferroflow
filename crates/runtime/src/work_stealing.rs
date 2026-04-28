@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ferroflow_core::{
-    ops::execute_op, Dag, Device, LiveMetrics, OpId, SchedulerMetrics, Tensor, WorkerLiveSnapshot,
+    ops::{execute_op, OpError},
+    Dag, Device, LiveMetrics, OpId, SchedulerMetrics, Tensor, TensorError, WorkerLiveSnapshot,
     WorkerLiveStatus,
 };
 use tokio::sync::{watch, Mutex};
@@ -82,6 +83,29 @@ fn adaptive_threshold(
 /// are identical.
 pub type WorkStealingError = SchedulerError;
 
+/// High-level device placement strategy for a scheduler run.
+///
+/// Maps the `--device` CLI flag to a concrete placement rule without exposing
+/// raw [`Device`] indices in caller code.
+pub enum DeviceStrategy {
+    /// All ops execute on the host CPU (default).
+    AllCpu,
+    /// All ops execute on CUDA device 0; tensors stay on GPU between ops.
+    #[cfg(feature = "cuda")]
+    AllGpu,
+}
+
+impl DeviceStrategy {
+    /// Returns the concrete [`Device`] for this strategy.
+    pub(crate) fn device(&self) -> Device {
+        match self {
+            DeviceStrategy::AllCpu => Device::Cpu,
+            #[cfg(feature = "cuda")]
+            DeviceStrategy::AllGpu => Device::Cuda(0),
+        }
+    }
+}
+
 /// Work-stealing scheduler.
 ///
 /// Workers start with a static round-robin assignment and steal ops from
@@ -128,6 +152,15 @@ impl WorkStealingScheduler {
     /// Sets the compute device used for all ops and returns `self`.
     pub fn with_device(mut self, device: Device) -> Self {
         self.device = device;
+        self
+    }
+
+    /// Sets the device placement strategy and returns `self`.
+    ///
+    /// Equivalent to [`with_device`](Self::with_device) but expressed via the
+    /// higher-level [`DeviceStrategy`] enum.
+    pub fn with_strategy(mut self, strategy: DeviceStrategy) -> Self {
+        self.device = strategy.device();
         self
     }
 
@@ -387,7 +420,14 @@ impl WorkStealingScheduler {
                         .ok_or(SchedulerError::Internal("valid op id"))?;
                     let inputs: Vec<Tensor> = {
                         let s = store.lock().await;
-                        op.input_ids.iter().map(|dep| s[dep].clone()).collect()
+                        op.input_ids
+                            .iter()
+                            .map(|dep| s[dep].to_device_cached(&device))
+                            .collect::<Result<Vec<_>, TensorError>>()
+                            .map_err(|e| SchedulerError::OpFailed {
+                                op_id,
+                                source: OpError::Tensor(e),
+                            })?
                     };
                     let input_refs: Vec<&Tensor> = inputs.iter().collect();
                     let result = execute_op(op, &input_refs, &device)
