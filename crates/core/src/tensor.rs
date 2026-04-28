@@ -1,3 +1,6 @@
+#[cfg(feature = "cuda")]
+use std::sync::Arc;
+
 use ndarray::{Array, ArrayD, IxDyn};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -26,15 +29,19 @@ pub enum TensorStorage {
     /// Host memory, backed by an [`ndarray::ArrayD`].
     Cpu(ArrayD<f32>),
     /// Device memory on a CUDA GPU.
+    ///
+    /// Wrapped in [`Arc`] so cloning a GPU tensor is O(1) (refcount increment),
+    /// not a device-to-host-to-device roundtrip.
     #[cfg(feature = "cuda")]
-    Cuda(cudarc::driver::CudaSlice<f32>),
+    Cuda(Arc<cudarc::driver::CudaSlice<f32>>),
 }
 
 /// A dense f32 tensor with optional GPU acceleration.
 ///
-/// Tensors flowing through the scheduler store are always CPU tensors in v0.1.
-/// GPU tensors may be created explicitly via [`Tensor::to_device`] or by ops
-/// that run natively on a CUDA device (future work).
+/// GPU tensors use [`Arc`]-backed storage so they can stay on the device
+/// between consecutive GPU ops without a round-trip copy.  Use
+/// [`Tensor::to_device_cached`] to obtain a tensor on a specific device
+/// without transferring when it is already there.
 pub struct Tensor {
     pub(crate) storage: TensorStorage,
     pub(crate) shape: Vec<usize>,
@@ -123,10 +130,13 @@ impl Tensor {
     /// Transfers the tensor to the specified device, copying data if necessary.
     ///
     /// Transfer directions and costs:
-    /// - CPU → CPU: clone (no copy)
+    /// - CPU → CPU: clone (ndarray deep copy)
     /// - CPU → CUDA: host-to-device copy via `htod_copy`
     /// - CUDA → CPU: synchronous device-to-host copy via `dtoh_sync_copy`
-    /// - CUDA → CUDA (same device): clone (device-to-device roundtrip through host)
+    /// - CUDA → CUDA: O(1) Arc refcount increment (no data movement)
+    ///
+    /// Prefer [`to_device_cached`](Self::to_device_cached) when the tensor may
+    /// already be on the target device.
     ///
     /// # Errors
     /// Returns [`TensorError::Cuda`] on CUDA driver failures.
@@ -143,20 +153,52 @@ impl Tensor {
                     .htod_copy(flat)
                     .map_err(|e| TensorError::Cuda(e.to_string()))?;
                 Ok(Self {
-                    storage: TensorStorage::Cuda(slice),
+                    storage: TensorStorage::Cuda(Arc::new(slice)),
                     shape: self.shape.clone(),
                 })
             }
             #[cfg(feature = "cuda")]
-            (Device::Cpu, TensorStorage::Cuda(slice)) => {
-                let dev = slice.device();
+            (Device::Cpu, TensorStorage::Cuda(arc)) => {
+                let dev = arc.device();
                 let flat = dev
-                    .dtoh_sync_copy(slice)
+                    .dtoh_sync_copy(&**arc)
                     .map_err(|e| TensorError::Cuda(e.to_string()))?;
                 Tensor::from_shape_vec(&self.shape, flat)
             }
             #[cfg(feature = "cuda")]
             (Device::Cuda(_), TensorStorage::Cuda(_)) => Ok(self.clone()),
+        }
+    }
+
+    /// Returns `true` if the tensor is already resident on `device`.
+    ///
+    /// When this returns `true`, [`to_device_cached`](Self::to_device_cached)
+    /// skips the transfer entirely and returns an O(1) clone.
+    pub fn is_on_device(&self, device: &crate::device::Device) -> bool {
+        use crate::device::Device;
+        match device {
+            Device::Cpu => matches!(&self.storage, TensorStorage::Cpu(_)),
+            #[cfg(feature = "cuda")]
+            Device::Cuda(_) => matches!(&self.storage, TensorStorage::Cuda(_)),
+        }
+    }
+
+    /// Returns a tensor on `device`, transferring only if the tensor is not
+    /// already resident there.
+    ///
+    /// - Already on device: O(1) clone (Arc refcount for GPU, ndarray view+clone for CPU).
+    /// - Not on device: performs a host↔device transfer via [`to_device`](Self::to_device).
+    ///
+    /// Use this in hot paths (scheduler input fetch, op dispatch) to eliminate
+    /// redundant CPU↔GPU round-trips on consecutive GPU ops.
+    ///
+    /// # Errors
+    /// Returns [`TensorError::Cuda`] on CUDA driver failures during transfer.
+    pub fn to_device_cached(&self, device: &crate::device::Device) -> Result<Self, TensorError> {
+        if self.is_on_device(device) {
+            Ok(self.clone())
+        } else {
+            self.to_device(device)
         }
     }
 }
@@ -168,23 +210,12 @@ impl Clone for Tensor {
                 storage: TensorStorage::Cpu(a.clone()),
                 shape: self.shape.clone(),
             },
-            // GPU clone: host roundtrip, analogous to CPU clone panicking on OOM.
+            // GPU clone: O(1) Arc refcount increment — no data movement.
             #[cfg(feature = "cuda")]
-            TensorStorage::Cuda(slice) => {
-                let dev = slice.device();
-                let flat = match dev.dtoh_sync_copy(slice) {
-                    Ok(v) => v,
-                    Err(e) => panic!("GPU tensor clone (DtoH) failed: {e}"),
-                };
-                let new_slice = match dev.htod_copy(flat) {
-                    Ok(s) => s,
-                    Err(e) => panic!("GPU tensor clone (HtoD) failed: {e}"),
-                };
-                Self {
-                    storage: TensorStorage::Cuda(new_slice),
-                    shape: self.shape.clone(),
-                }
-            }
+            TensorStorage::Cuda(arc) => Self {
+                storage: TensorStorage::Cuda(Arc::clone(arc)),
+                shape: self.shape.clone(),
+            },
         }
     }
 }
