@@ -95,7 +95,7 @@ impl SequentialExecutor {
         }
 
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let metrics = SchedulerMetrics::new(total_ops, completed_ops, elapsed_ms, 0.0, 0, 0, 0, 0);
+        let metrics = SchedulerMetrics::new(total_ops, completed_ops, elapsed_ms, 0.0, 0, 0, 0, 0, 0, 0);
         Ok((store, metrics))
     }
 }

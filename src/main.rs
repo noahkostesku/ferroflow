@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use ferroflow_core::{
     gen_imbalanced, gen_large_transformer, gen_large_wide, gen_matmul_chain, gen_matmul_parallel,
     gen_resnet_block, gen_transformer_block, gen_wide_dag, gen_xlarge_transformer, gen_xlarge_wide,
-    Dag, Device, Op, OpKind, RunMetrics, SchedulerMetrics, Tensor,
+    Dag, Device, DevicePolicy, Op, OpKind, RunMetrics, SchedulerMetrics, Tensor,
 };
 use ferroflow_onnx::{dag_summary, load_model};
 use ferroflow_runtime::{SequentialExecutor, StaticScheduler, WorkStealingScheduler};
@@ -103,6 +103,13 @@ enum Command {
         /// Synthetic DAG topology.
         #[arg(long, conflicts_with = "model")]
         dag: Option<SyntheticDag>,
+        /// Device policy: "cpu" (default), "cuda"/"cuda:N" (requires cuda feature),
+        /// or "auto" (routes matmul≥threshold and conv2d to GPU, elementwise to CPU).
+        #[arg(long, default_value = "cpu")]
+        device: String,
+        /// Matmul output size threshold (elements) for GPU routing under --device auto.
+        #[arg(long, default_value = "262144")]
+        gpu_matmul_threshold: usize,
         // Transformer params
         #[arg(long, default_value = "64")]
         seq_len: usize,
@@ -165,9 +172,13 @@ enum Command {
         /// Disable adaptive steal threshold; use the fixed --steal-threshold value instead.
         #[arg(long)]
         no_adaptive_threshold: bool,
-        /// Compute device: "cpu" (default) or "cuda" / "cuda:N" (requires --features cuda).
+        /// Device policy: "cpu" (default), "cuda"/"cuda:N" (requires cuda feature),
+        /// or "auto" (routes matmul≥threshold and conv2d to GPU, elementwise to CPU).
         #[arg(long, default_value = "cpu")]
         device: String,
+        /// Matmul output size threshold (elements) for GPU routing under --device auto.
+        #[arg(long, default_value = "262144")]
+        gpu_matmul_threshold: usize,
         // Transformer params
         #[arg(long, default_value = "64")]
         seq_len: usize,
@@ -652,6 +663,7 @@ fn run_mpi_bench(
 fn run_info(
     model: Option<&PathBuf>,
     dag: Option<&SyntheticDag>,
+    policy: &DevicePolicy,
     p: &SyntheticDagParams,
 ) -> Result<()> {
     match (model, dag) {
@@ -666,9 +678,16 @@ fn run_info(
         }
         _ => anyhow::bail!("supply exactly one of --model or --dag"),
     }
+    if let DevicePolicy::Auto { gpu_matmul_threshold } = policy {
+        let side = (*gpu_matmul_threshold as f64).sqrt() as usize;
+        println!("\nRouting policy: auto");
+        println!("GPU ops: matmul (≥{side}×{side}), conv2d");
+        println!("CPU ops: relu, add, reshape, reduce, layernorm, softmax, batchnorm, maxpool");
+    }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_model(
     model: Option<&PathBuf>,
     dag: Option<&SyntheticDag>,
@@ -676,7 +695,7 @@ async fn run_model(
     scheduler: OnnxScheduler,
     steal_threshold: usize,
     adaptive_threshold: bool,
-    device: Device,
+    policy: DevicePolicy,
     p: &SyntheticDagParams,
 ) -> Result<()> {
     let (arc_dag, sources, is_skew, label) = match (model, dag) {
@@ -736,6 +755,14 @@ async fn run_model(
 
     let dag_size = arc_dag.len();
 
+    // For schedulers that don't support per-op routing, fall back to a fixed device.
+    let static_device = match &policy {
+        DevicePolicy::AllCpu => Device::Cpu,
+        #[cfg(feature = "cuda")]
+        DevicePolicy::AllGpu => Device::Cuda(0),
+        DevicePolicy::Auto { .. } => Device::Cpu,
+    };
+
     let (sched_name, m) = match scheduler {
         OnnxScheduler::Sequential => {
             let (_, m) = SequentialExecutor::execute(&arc_dag, sources)
@@ -743,7 +770,7 @@ async fn run_model(
             ("sequential", m)
         }
         OnnxScheduler::Static => {
-            let sched = StaticScheduler::new(&arc_dag, workers).with_device(device);
+            let sched = StaticScheduler::new(&arc_dag, workers).with_device(static_device);
             let (_, m) = sched
                 .execute(std::sync::Arc::clone(&arc_dag), sources)
                 .await
@@ -754,7 +781,7 @@ async fn run_model(
             let sched = WorkStealingScheduler::new(workers)
                 .with_steal_threshold(steal_threshold)
                 .with_adaptive_threshold(adaptive_threshold)
-                .with_device(device);
+                .with_policy(policy);
             let (_, m) = sched
                 .execute(std::sync::Arc::clone(&arc_dag), sources)
                 .await
@@ -773,12 +800,14 @@ async fn run_model(
     };
     println!(
         "[run] {sched_name}/{label} ({workers}w): {:.1} ms  {:.0} ops/s  \
-         idle={:.1}%  steals={:.1}/s  threshold={}",
+         idle={:.1}%  steals={:.1}/s  threshold={}  gpu_ops={}  cpu_ops={}",
         run.metrics.elapsed_ms,
         run.metrics.throughput_ops_per_sec,
         idle_pct(&run),
         run.metrics.steal_rate,
         run.metrics.threshold_final,
+        run.metrics.gpu_ops,
+        run.metrics.cpu_ops,
     );
     Ok(())
 }
@@ -814,6 +843,8 @@ async fn main() -> Result<()> {
         Command::Info {
             model,
             dag,
+            device: device_str,
+            gpu_matmul_threshold,
             seq_len,
             d_model,
             n_heads,
@@ -831,6 +862,9 @@ async fn main() -> Result<()> {
             n_branches,
             ops_per_branch,
         } => {
+            let policy = DevicePolicy::from_str(&device_str)
+                .with_context(|| format!("invalid --device value: {device_str:?}"))?
+                .with_matmul_threshold(gpu_matmul_threshold);
             let p = SyntheticDagParams {
                 seq_len,
                 d_model,
@@ -849,7 +883,7 @@ async fn main() -> Result<()> {
                 n_branches,
                 ops_per_branch,
             };
-            run_info(model.as_ref(), dag.as_ref(), &p)?;
+            run_info(model.as_ref(), dag.as_ref(), &policy, &p)?;
         }
 
         Command::Run {
@@ -860,6 +894,7 @@ async fn main() -> Result<()> {
             steal_threshold,
             no_adaptive_threshold,
             device: device_str,
+            gpu_matmul_threshold,
             seq_len,
             d_model,
             n_heads,
@@ -877,8 +912,9 @@ async fn main() -> Result<()> {
             n_branches,
             ops_per_branch,
         } => {
-            let device = Device::from_str(&device_str)
-                .with_context(|| format!("invalid --device value: {device_str:?}"))?;
+            let policy = DevicePolicy::from_str(&device_str)
+                .with_context(|| format!("invalid --device value: {device_str:?}"))?
+                .with_matmul_threshold(gpu_matmul_threshold);
             let p = SyntheticDagParams {
                 seq_len,
                 d_model,
@@ -904,7 +940,7 @@ async fn main() -> Result<()> {
                 scheduler,
                 steal_threshold,
                 !no_adaptive_threshold,
-                device,
+                policy,
                 &p,
             )
             .await?;

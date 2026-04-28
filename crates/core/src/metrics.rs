@@ -93,10 +93,17 @@ pub struct SchedulerMetrics {
     /// Number of times the adaptive threshold changed value during execution.
     #[serde(default)]
     pub threshold_adjustments: u64,
+    /// Ops routed to GPU under the `auto` policy (0 for `AllCpu`/`AllGpu` runs).
+    #[serde(default)]
+    pub gpu_ops: u64,
+    /// Ops routed to CPU under the `auto` policy (0 for `AllCpu`/`AllGpu` runs).
+    #[serde(default)]
+    pub cpu_ops: u64,
 }
 
 impl SchedulerMetrics {
     /// Constructs `SchedulerMetrics`, computing derived fields from raw values.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         total_ops: u64,
         completed_ops: u64,
@@ -106,6 +113,8 @@ impl SchedulerMetrics {
         successful_steals: u64,
         threshold_final: usize,
         threshold_adjustments: u64,
+        gpu_ops: u64,
+        cpu_ops: u64,
     ) -> Self {
         let elapsed_sec = elapsed_ms / 1000.0;
         let throughput_ops_per_sec = if elapsed_sec > 0.0 {
@@ -129,6 +138,8 @@ impl SchedulerMetrics {
             steal_rate,
             threshold_final,
             threshold_adjustments,
+            gpu_ops,
+            cpu_ops,
         }
     }
 }
@@ -169,7 +180,9 @@ impl fmt::Display for RunMetrics {
         writeln!(f, "successful_steals : {}", m.successful_steals)?;
         writeln!(f, "steal_rate /s     : {:.2}", m.steal_rate)?;
         writeln!(f, "threshold_final   : {}", m.threshold_final)?;
-        write!(f, "threshold_adj     : {}", m.threshold_adjustments)
+        writeln!(f, "threshold_adj     : {}", m.threshold_adjustments)?;
+        writeln!(f, "gpu_ops           : {}", m.gpu_ops)?;
+        write!(f, "cpu_ops           : {}", m.cpu_ops)
     }
 }
 
@@ -178,7 +191,7 @@ mod tests {
     use super::*;
 
     fn sample_metrics() -> SchedulerMetrics {
-        SchedulerMetrics::new(20, 20, 50.0, 5.0, 8, 3, 2, 4)
+        SchedulerMetrics::new(20, 20, 50.0, 5.0, 8, 3, 2, 4, 0, 0)
     }
 
     fn sample_run() -> RunMetrics {
@@ -203,7 +216,7 @@ mod tests {
 
     #[test]
     fn zero_elapsed_no_divide_by_zero() {
-        let m = SchedulerMetrics::new(10, 10, 0.0, 0.0, 0, 0, 0, 0);
+        let m = SchedulerMetrics::new(10, 10, 0.0, 0.0, 0, 0, 0, 0, 0, 0);
         assert_eq!(m.throughput_ops_per_sec, 0.0);
         assert_eq!(m.steal_rate, 0.0);
     }
@@ -241,5 +254,7 @@ mod tests {
         assert!(s.contains("idle_time_ms"));
         assert!(s.contains("threshold_final"));
         assert!(s.contains("threshold_adj"));
+        assert!(s.contains("gpu_ops"));
+        assert!(s.contains("cpu_ops"));
     }
 }

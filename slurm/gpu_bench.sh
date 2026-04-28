@@ -54,5 +54,22 @@ echo "=== GPU A100 larger matrices (job ${SLURM_JOB_ID}) ===" | tee -a "${RESULT
     --workers 8 --scheduler work-stealing --device cuda \
     | tee -a "${RESULTS}"
 
+# ── Auto routing — large matmul (should prefer GPU) ──────────────────────────
+echo "" | tee -a "${RESULTS}"
+echo "=== Auto routing - 2048x2048 (job ${SLURM_JOB_ID}) ===" | tee -a "${RESULTS}"
+
+"${BINARY}" run --dag matmul-parallel \
+    --n-branches 16 --ops-per-branch 8 --matrix-size 2048 \
+    --workers 8 --scheduler work-stealing --device auto \
+    | tee -a "${RESULTS}"
+
+# ── Auto routing — ResNet-18 (conv2d→GPU, relu/add→CPU) ──────────────────────
+echo "" | tee -a "${RESULTS}"
+echo "=== Auto routing - ResNet-18 (job ${SLURM_JOB_ID}) ===" | tee -a "${RESULTS}"
+
+"${BINARY}" run --model models/resnet18.onnx \
+    --workers 8 --scheduler work-stealing --device auto \
+    | tee -a "${RESULTS}"
+
 echo "" | tee -a "${RESULTS}"
 echo "[gpu-bench] finished: $(date -Iseconds)"

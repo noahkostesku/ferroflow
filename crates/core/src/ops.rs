@@ -89,6 +89,24 @@ pub fn execute_op(op: &Op, tensors: &[&Tensor], device: &Device) -> Result<Tenso
     }
 }
 
+/// Executes `op` on the device selected by `policy`.
+///
+/// Calls [`gpu_available`](crate::device::gpu_available) (cached, O(1) after
+/// the first call) to resolve the target device, then delegates to
+/// [`execute_op`].
+///
+/// # Errors
+/// Returns [`OpError`] on shape or arity mismatches, or CUDA driver failures.
+pub fn execute_op_auto(
+    op: &Op,
+    tensors: &[&Tensor],
+    policy: &crate::device::DevicePolicy,
+) -> Result<Tensor, OpError> {
+    let gpu = crate::device::gpu_available();
+    let device = policy.device_for_op(op, gpu);
+    execute_op(op, tensors, &device)
+}
+
 // ── CPU execution path ────────────────────────────────────────────────────────
 
 fn execute_op_cpu(op: &Op, tensors: &[&Tensor]) -> Result<Tensor, OpError> {
@@ -704,6 +722,7 @@ fn reshape(x: &Tensor, target_shape: &[i64]) -> Result<Tensor, OpError> {
         .iter()
         .map(|&d| {
             if d < 0 {
+                #[allow(clippy::manual_checked_ops)]
                 if known_product == 0 {
                     0
                 } else {

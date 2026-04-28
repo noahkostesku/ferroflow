@@ -11,6 +11,7 @@ pub use ferroflow_core::{
     LiveMetrics, RunMetrics, SchedulerMetrics, WorkerLiveSnapshot, WorkerLiveStatus,
 };
 pub use static_scheduler::{SchedulerError, StaticScheduler};
+pub use ferroflow_core::DevicePolicy;
 pub use work_stealing::{DeviceStrategy, WorkStealingScheduler};
 pub use worker::{Message, WorkQueue, WorkerId, WorkerTrait};
 
