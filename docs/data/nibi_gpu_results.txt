@@ -1,0 +1,16 @@
+=== CPU baseline 2048x2048 ===
+130 ops (2 sources, 128 compute), 256 edges
+  matmul: 128
+[run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 4859.5 ms  26 ops/s  idle=36.5%  steals=1.9/s  threshold=4  gpu_ops=0  cpu_ops=128  gpu_batches=0  avg_batch=0.0
+=== H100 GPU 256x256 ===
+130 ops (2 sources, 128 compute), 256 edges
+  matmul: 128
+[run] work-stealing/matmul-parallel(32x4,m=256) (8w): 763.6 ms  168 ops/s  idle=73.3%  steals=21.0/s  threshold=4  gpu_ops=128  cpu_ops=0  gpu_batches=8  avg_batch=14.0
+=== H100 GPU 2048x2048 ===
+130 ops (2 sources, 128 compute), 256 edges
+  matmul: 128
+[run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 2472.6 ms  52 ops/s  idle=49.6%  steals=10.9/s  threshold=4  gpu_ops=128  cpu_ops=0  gpu_batches=8  avg_batch=12.6
+=== H100 GPU auto routing 2048x2048 ===
+130 ops (2 sources, 128 compute), 256 edges
+  matmul: 128
+[run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 2458.6 ms  52 ops/s  idle=45.6%  steals=11.0/s  threshold=4  gpu_ops=128  cpu_ops=0  gpu_batches=8  avg_batch=12.6

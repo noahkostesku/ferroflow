@@ -294,4 +294,25 @@ _Full multi-node scaling results (4 / 8 / 16 / 32 nodes) pending Narval runs._
 | 16×8 branches, 2048×2048 | A100 GPU | 128 | 62 ops/s | 2,049ms |
 | 8×8 branches, 4096×4096 | A100 GPU | 64 | 17 ops/s | 3,689ms |
 
-**Analysis:** The A100 achieves 2.5× higher throughput than 8 CPU workers on 2048×2048 matmul workloads. Per-op CPU↔GPU transfer overhead limits the speedup — each of the 128 ops transfers input tensors to GPU memory, executes cuBLAS GEMM, and returns results to CPU for DAG dependency resolution. Persistent GPU tensor storage across dependent ops would eliminate this overhead and is the primary optimization target for the GPU path.
+## Nibi Result (1xH100)
+
+[nibi-gpu] job 12970417 started: 2026-04-29T12:00:11-04:00
+[nibi-gpu] node: g19.nibi.sharcnet
+[nibi-gpu] GPU: NVIDIA H100 80GB HBM3, 81559 MiB
+=== CPU baseline 2048x2048 ===
+130 ops (2 sources, 128 compute), 256 edges
+  matmul: 128
+[run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 4859.5 ms  26 ops/s  idle=36.5%  steals=1.9/s  threshold=4  gpu_ops=0  cpu_ops=128  gpu_batches=0  avg_batch=0.0
+=== H100 GPU 256x256 ===
+130 ops (2 sources, 128 compute), 256 edges
+  matmul: 128
+[run] work-stealing/matmul-parallel(32x4,m=256) (8w): 763.6 ms  168 ops/s  idle=73.3%  steals=21.0/s  threshold=4  gpu_ops=128  cpu_ops=0  gpu_batches=8  avg_batch=14.0
+=== H100 GPU 2048x2048 ===
+130 ops (2 sources, 128 compute), 256 edges
+  matmul: 128
+[run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 2472.6 ms  52 ops/s  idle=49.6%  steals=10.9/s  threshold=4  gpu_ops=128  cpu_ops=0  gpu_batches=8  avg_batch=12.6
+=== H100 GPU auto routing 2048x2048 ===
+130 ops (2 sources, 128 compute), 256 edges
+  matmul: 128
+[run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 2458.6 ms  52 ops/s  idle=45.6%  steals=11.0/s  threshold=4  gpu_ops=128  cpu_ops=0  gpu_batches=8  avg_batch=12.6
+[nibi-gpu] finished: 2026-04-29T12:00:22-04:00
