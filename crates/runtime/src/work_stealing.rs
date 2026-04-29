@@ -9,6 +9,8 @@ use ferroflow_core::{
     Dag, Device, DevicePolicy, LiveMetrics, OpId, SchedulerMetrics, Tensor, TensorError,
     WorkerLiveSnapshot, WorkerLiveStatus,
 };
+#[cfg(feature = "cuda")]
+use ferroflow_core::{matmul_cuda_async, sync_stream, GpuWorkerContext, OpKind};
 use tokio::sync::{watch, Mutex};
 
 use crate::static_scheduler::SchedulerError;
@@ -76,6 +78,27 @@ fn adaptive_threshold(
     };
     let max_t = (n_workers / 4).max(4);
     raw.clamp(1, max_t)
+}
+
+#[cfg(feature = "cuda")]
+/// Returns `true` if none of the ops in `op_ids` directly depends on any other
+/// op in the same set (shared upstream ancestors are allowed).
+///
+/// Checks only direct `input_ids` edges, which is sufficient for the parallel-
+/// matmul DAG topology (all branches are one level deep).  Safe to batch if
+/// this returns `true`; may conservatively refuse to batch in rare cases where
+/// an intermediate op sits between two others in the set (those should not
+/// appear in the same worker queue at the same time anyway).
+fn ops_are_independent(op_ids: &[OpId], dag: &Dag) -> bool {
+    let id_set: std::collections::HashSet<OpId> = op_ids.iter().copied().collect();
+    for &oid in op_ids {
+        if let Some(op) = dag.get_op(oid) {
+            if op.input_ids.iter().any(|dep| id_set.contains(dep)) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Errors returned by [`WorkStealingScheduler::execute`].
@@ -248,6 +271,8 @@ impl WorkStealingScheduler {
         let threshold_final = Arc::new(AtomicUsize::new(fixed_threshold));
         let gpu_ops = Arc::new(AtomicU64::new(0));
         let cpu_ops = Arc::new(AtomicU64::new(0));
+        let gpu_batches = Arc::new(AtomicU64::new(0));
+        let gpu_batch_size_total = Arc::new(AtomicU64::new(0));
 
         // Per-worker tracking for the live-metrics ticker.
         let worker_ops: Arc<Vec<AtomicU64>> = Arc::new((0..n).map(|_| AtomicU64::new(0)).collect());
@@ -344,6 +369,10 @@ impl WorkStealingScheduler {
             let policy = self.policy.clone();
             let gpu_ops = Arc::clone(&gpu_ops);
             let cpu_ops = Arc::clone(&cpu_ops);
+            #[cfg(feature = "cuda")]
+            let gpu_batches = Arc::clone(&gpu_batches);
+            #[cfg(feature = "cuda")]
+            let gpu_batch_size_total = Arc::clone(&gpu_batch_size_total);
 
             handles.push(tokio::spawn(async move {
                 let mut attempt = 0usize;
@@ -444,12 +473,153 @@ impl WorkStealingScheduler {
                             .fetch_add(tw.elapsed().as_micros() as u64, Ordering::Relaxed);
                     }
 
+                    let gpu = gpu_available();
+
+                    // ── GPU batch path ────────────────────────────────────────
+                    // Attempt to accumulate independent GPU matmul ops from the
+                    // local queue and submit them to a single CUDA stream, then
+                    // sync once.  Falls through to the single-op path on any
+                    // failure so the CPU path is completely unchanged.
+                    #[cfg(feature = "cuda")]
+                    let batch_taken: bool = 'batch: {
+                        let lead_op = dag
+                            .get_op(op_id)
+                            .ok_or(SchedulerError::Internal("valid op id"))?;
+                        let lead_dev = policy.device_for_op(lead_op, gpu);
+                        if !matches!(lead_dev, Device::Cuda(_)) {
+                            break 'batch false;
+                        }
+                        if !matches!(lead_op.kind, OpKind::Matmul { .. }) {
+                            break 'batch false;
+                        }
+
+                        // Drain the local queue — put non-batchable ops back.
+                        let extra_ids = queues[worker_id].drain_all().await;
+                        let mut batch: Vec<OpId> = vec![op_id];
+                        let mut requeue: Vec<OpId> = Vec::new();
+                        {
+                            let s = store.lock().await;
+                            for eid in extra_ids {
+                                let Some(eop) = dag.get_op(eid) else {
+                                    requeue.push(eid);
+                                    continue;
+                                };
+                                let edev = policy.device_for_op(eop, gpu);
+                                if matches!(edev, Device::Cuda(_))
+                                    && matches!(eop.kind, OpKind::Matmul { .. })
+                                    && eop.input_ids.iter().all(|d| s.contains_key(d))
+                                {
+                                    batch.push(eid);
+                                } else {
+                                    requeue.push(eid);
+                                }
+                            }
+                        }
+                        queues[worker_id].push_front_bulk(requeue).await;
+
+                        if batch.len() < 2 || !ops_are_independent(&batch, &dag) {
+                            // Put extras back; fall through to single-op path.
+                            let extras: Vec<OpId> = batch.drain(1..).collect();
+                            queues[worker_id].push_front_bulk(extras).await;
+                            break 'batch false;
+                        }
+
+                        // Collect inputs for every op in the batch while we hold
+                        // the store lock.  All data is Send so it can cross the
+                        // spawn_blocking boundary below.
+                        let mut batch_inputs: Vec<(OpId, Tensor, Tensor)> =
+                            Vec::with_capacity(batch.len());
+                        let mut input_failed = false;
+                        {
+                            let s = store.lock().await;
+                            let gpu_dev = Device::Cuda(0);
+                            for &bid in &batch {
+                                let bop = match dag.get_op(bid) {
+                                    Some(o) => o,
+                                    None => { input_failed = true; break; }
+                                };
+                                if bop.input_ids.len() < 2 {
+                                    input_failed = true;
+                                    break;
+                                }
+                                let a = match s
+                                    .get(&bop.input_ids[0])
+                                    .map(|t| t.to_device_cached(&gpu_dev))
+                                {
+                                    Some(Ok(t)) => t,
+                                    _ => { input_failed = true; break; }
+                                };
+                                let b = match s
+                                    .get(&bop.input_ids[1])
+                                    .map(|t| t.to_device_cached(&gpu_dev))
+                                {
+                                    Some(Ok(t)) => t,
+                                    _ => { input_failed = true; break; }
+                                };
+                                batch_inputs.push((bid, a, b));
+                            }
+                        }
+
+                        if input_failed {
+                            let extras: Vec<OpId> = batch.drain(1..).collect();
+                            queues[worker_id].push_front_bulk(extras).await;
+                            break 'batch false;
+                        }
+
+                        // GpuWorkerContext is !Send (CudaStream holds a raw pointer).
+                        // Create it inside spawn_blocking so it never crosses an await.
+                        // Phase 1: submit GEMMs to the context's stream (non-blocking).
+                        // Phase 2: sync_stream blocks until all GEMMs complete.
+                        let n_batch = batch_inputs.len();
+                        let blocking_result = tokio::task::spawn_blocking(
+                            move || -> Result<Vec<(OpId, Tensor)>, TensorError> {
+                                let ctx = GpuWorkerContext::new(0)?;
+                                let mut pending = Vec::with_capacity(n_batch);
+                                for (bid, a, b) in &batch_inputs {
+                                    pending.push((*bid, matmul_cuda_async(a, b, &ctx)?));
+                                }
+                                sync_stream(&ctx)?;
+                                Ok(pending)
+                            },
+                        )
+                        .await;
+
+                        let results = match blocking_result {
+                            Ok(Ok(r)) => r,
+                            _ => {
+                                let extras: Vec<OpId> = batch.drain(1..).collect();
+                                queues[worker_id].push_front_bulk(extras).await;
+                                break 'batch false;
+                            }
+                        };
+
+                        let batch_n = results.len() as u64;
+                        {
+                            let mut s = store.lock().await;
+                            for (bid, tensor) in results {
+                                s.insert(bid, tensor);
+                            }
+                        }
+                        gpu_ops.fetch_add(batch_n, Ordering::Relaxed);
+                        gpu_batches.fetch_add(1, Ordering::Relaxed);
+                        gpu_batch_size_total.fetch_add(n_batch as u64, Ordering::Relaxed);
+                        worker_ops[worker_id].fetch_add(batch_n, Ordering::Relaxed);
+                        completed.fetch_add(batch_n, Ordering::Release);
+                        version_tx.send_modify(|v| *v += 1);
+                        true
+                    };
+
+                    #[cfg(feature = "cuda")]
+                    if batch_taken {
+                        continue;
+                    }
+
+                    // ── Single-op path (CPU path completely unchanged) ────────
                     let op = dag
                         .get_op(op_id)
                         .ok_or(SchedulerError::Internal("valid op id"))?;
                     // Resolve the target device once — used for input transfer and
                     // routing-metric tracking before the execute call.
-                    let gpu = gpu_available();
                     let target_device = policy.device_for_op(op, gpu);
                     let is_gpu_op = target_device != Device::Cpu;
                     let inputs: Vec<Tensor> = {
@@ -506,6 +676,8 @@ impl WorkStealingScheduler {
         let tf = threshold_final.load(Ordering::Relaxed);
         let go = gpu_ops.load(Ordering::Relaxed);
         let co = cpu_ops.load(Ordering::Relaxed);
+        let gb = gpu_batches.load(Ordering::Relaxed);
+        let gbst = gpu_batch_size_total.load(Ordering::Relaxed);
         let metrics = SchedulerMetrics::new(
             total_ops,
             total_ops,
@@ -517,6 +689,8 @@ impl WorkStealingScheduler {
             ta,
             go,
             co,
+            gb,
+            gbst,
         );
 
         let store = Arc::try_unwrap(store)

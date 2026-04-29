@@ -18,3 +18,5 @@ pub use metrics::{
 pub use op::{Op, OpId, OpKind};
 pub use ops::{execute_op, execute_op_auto, OpError};
 pub use tensor::{Tensor, TensorError};
+#[cfg(feature = "cuda")]
+pub use tensor::{matmul_cuda_async, sync_stream, GpuWorkerContext};
