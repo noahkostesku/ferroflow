@@ -800,7 +800,8 @@ async fn run_model(
     };
     println!(
         "[run] {sched_name}/{label} ({workers}w): {:.1} ms  {:.0} ops/s  \
-         idle={:.1}%  steals={:.1}/s  threshold={}  gpu_ops={}  cpu_ops={}",
+         idle={:.1}%  steals={:.1}/s  threshold={}  gpu_ops={}  cpu_ops={}  \
+         gpu_batches={}  avg_batch={:.1}",
         run.metrics.elapsed_ms,
         run.metrics.throughput_ops_per_sec,
         idle_pct(&run),
@@ -808,6 +809,8 @@ async fn run_model(
         run.metrics.threshold_final,
         run.metrics.gpu_ops,
         run.metrics.cpu_ops,
+        run.metrics.gpu_batches,
+        run.metrics.gpu_batch_size_avg,
     );
     Ok(())
 }

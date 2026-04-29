@@ -1,6 +1,9 @@
 #[cfg(feature = "cuda")]
 use std::sync::Arc;
 
+#[cfg(feature = "cuda")]
+use cudarc::cublas::{sys::cublasOperation_t::CUBLAS_OP_N, CudaBlas, Gemm, GemmConfig};
+
 use ndarray::{Array, ArrayD, IxDyn};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -227,6 +230,159 @@ impl std::fmt::Debug for Tensor {
             #[cfg(feature = "cuda")]
             TensorStorage::Cuda(_) => write!(f, "Tensor::Cuda(shape={:?})", self.shape),
         }
+    }
+}
+
+// ── GPU worker context ────────────────────────────────────────────────────────
+
+/// Per-worker CUDA execution context: one persistent cuBLAS handle and stream.
+///
+/// Create one per Tokio worker with [`GpuWorkerContext::new`]. Never share
+/// between workers — each worker must own its own context so submissions to
+/// `stream` are independent and can be synced per-batch without blocking peers.
+#[cfg(feature = "cuda")]
+pub struct GpuWorkerContext {
+    pub(crate) device: Arc<cudarc::driver::CudaDevice>,
+    pub(crate) cublas: CudaBlas,
+    pub(crate) stream: cudarc::driver::CudaStream,
+}
+
+#[cfg(feature = "cuda")]
+impl GpuWorkerContext {
+    /// Creates a new context for `device_idx` (0 = first GPU).
+    ///
+    /// Opens a new CUDA stream and a dedicated cuBLAS handle bound to that
+    /// stream. All subsequent `matmul_cuda_async` calls using this context
+    /// queue kernels on the same stream; call [`sync_stream`] to wait for them.
+    ///
+    /// # Errors
+    /// Returns [`TensorError::Cuda`] if the CUDA driver or cuBLAS fails to
+    /// initialise.
+    pub fn new(device_idx: usize) -> Result<Self, TensorError> {
+        let device = crate::device::get_cuda_device(device_idx)
+            .map_err(|e| TensorError::Cuda(e.to_string()))?;
+        let stream = device
+            .fork_default_stream()
+            .map_err(|e| TensorError::Cuda(e.to_string()))?;
+        let cublas = CudaBlas::new(Arc::clone(&device))
+            .map_err(|e| TensorError::Cuda(e.to_string()))?;
+        // Bind the cuBLAS handle to ctx.stream so subsequent gemm calls are
+        // queued on that stream and can be awaited with a single sync.
+        unsafe {
+            cublas
+                .set_stream(Some(&stream))
+                .map_err(|e| TensorError::Cuda(e.to_string()))?;
+        }
+        Ok(Self { device, cublas, stream })
+    }
+}
+
+/// Submits a matrix multiply `A·B` to `ctx.stream` without waiting for the GPU
+/// to finish.
+///
+/// Returns a [`Tensor`] backed by the allocated output buffer.  The buffer
+/// contents are **not valid** until [`sync_stream`] has been called on the same
+/// context.  Call this in a loop for all independent ops, then call
+/// [`sync_stream`] once to materialise all results.
+///
+/// Inputs may already reside on the GPU (O(1) Arc clone) or on the CPU (one
+/// H→D transfer per input).
+///
+/// # Errors
+/// Returns [`TensorError::Cuda`] on shape mismatches or CUDA driver failures.
+#[cfg(feature = "cuda")]
+pub fn matmul_cuda_async(
+    a: &Tensor,
+    b: &Tensor,
+    ctx: &GpuWorkerContext,
+) -> Result<Tensor, TensorError> {
+    if a.shape.len() != 2 {
+        return Err(TensorError::Cuda(format!(
+            "matmul_cuda_async: A must be 2-D, got {:?}",
+            a.shape
+        )));
+    }
+    if b.shape.len() != 2 {
+        return Err(TensorError::Cuda(format!(
+            "matmul_cuda_async: B must be 2-D, got {:?}",
+            b.shape
+        )));
+    }
+    let (m, k) = (a.shape[0], a.shape[1]);
+    let (kb, n) = (b.shape[0], b.shape[1]);
+    if k != kb {
+        return Err(TensorError::Cuda(format!(
+            "matmul_cuda_async: A({m},{k}) · B({kb},{n}) — inner dims must match"
+        )));
+    }
+
+    let a_gpu = match &a.storage {
+        TensorStorage::Cuda(arc) => Arc::clone(arc),
+        TensorStorage::Cpu(arr) => Arc::new(
+            ctx.device
+                .htod_copy(arr.iter().copied().collect::<Vec<f32>>())
+                .map_err(|e| TensorError::Cuda(e.to_string()))?,
+        ),
+    };
+    let b_gpu = match &b.storage {
+        TensorStorage::Cuda(arc) => Arc::clone(arc),
+        TensorStorage::Cpu(arr) => Arc::new(
+            ctx.device
+                .htod_copy(arr.iter().copied().collect::<Vec<f32>>())
+                .map_err(|e| TensorError::Cuda(e.to_string()))?,
+        ),
+    };
+
+    // beta=0 so the output buffer's initial values are irrelevant; alloc_zeros
+    // is used for safety but the zeroing and the GEMM may overlap on different
+    // streams — acceptable because beta=0 means GEMM never reads old C.
+    let mut c_gpu = ctx
+        .device
+        .alloc_zeros::<f32>(m * n)
+        .map_err(|e| TensorError::Cuda(e.to_string()))?;
+
+    // cuBLAS is column-major: C = A·B (row-major) ⟺ C^T = B^T·A^T (col-major).
+    // Swap operand order: m=N, n=M, k=K; a=B_data (lda=N), b=A_data (ldb=K).
+    let cfg = GemmConfig {
+        transa: CUBLAS_OP_N,
+        transb: CUBLAS_OP_N,
+        m: n as i32,
+        n: m as i32,
+        k: k as i32,
+        alpha: 1.0f32,
+        lda: n as i32,
+        ldb: k as i32,
+        beta: 0.0f32,
+        ldc: n as i32,
+    };
+    // Queues the GEMM kernel on ctx.stream — non-blocking on the CPU side.
+    unsafe { ctx.cublas.gemm(cfg, &*b_gpu, &*a_gpu, &mut c_gpu) }
+        .map_err(|e| TensorError::Cuda(e.to_string()))?;
+
+    Ok(Tensor {
+        storage: TensorStorage::Cuda(Arc::new(c_gpu)),
+        shape: vec![m, n],
+    })
+}
+
+/// Blocks the calling thread until all kernels queued on `ctx.stream` have
+/// completed.
+///
+/// Call this after a batch of [`matmul_cuda_async`] submissions to materialise
+/// all output tensors in the batch at once.
+///
+/// # Errors
+/// Returns [`TensorError::Cuda`] if the CUDA driver reports a stream error.
+#[cfg(feature = "cuda")]
+pub fn sync_stream(ctx: &GpuWorkerContext) -> Result<(), TensorError> {
+    // CudaStream has no .synchronize() method in cudarc 0.12.
+    // The stream-level sync lives in result::stream::synchronize, which takes
+    // the raw sys::CUstream handle exposed by the public `.stream` field.
+    // We use per-stream sync rather than device.synchronize() so we only block
+    // on ctx.stream's work, leaving other workers' streams unaffected.
+    unsafe {
+        cudarc::driver::result::stream::synchronize(ctx.stream.stream)
+            .map_err(|e| TensorError::Cuda(e.to_string()))
     }
 }
 

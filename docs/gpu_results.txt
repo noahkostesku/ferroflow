@@ -12,33 +12,30 @@
 [run] work-stealing/matmul-parallel(8x8,m=4096) (8w): 3689.1 ms  17 ops/s  idle=42.1%  steals=1.6/s  threshold=1
 
 ----
-[gpu-bench] job 60018340 started: 2026-04-28T17:57:10-04:00
-[gpu-bench] node: ng10705
+[noahkost@narval1 ferroflow]$ cat gpu-bench-60026347.out 
+[gpu-bench] job 60026347 started: 2026-04-28T21:07:08-04:00
+[gpu-bench] node: ng10902
 [gpu-bench] GPU: NVIDIA A100-SXM4-40GB
 [gpu-bench] CPUs per task: 8
 
-=== CPU baseline (job 60018340) ===
+=== CPU baseline (job 60026347) ===
 130 ops (2 sources, 128 compute), 256 edges
   matmul: 128
-[run] work-stealing/matmul-parallel(32x4,m=256) (8w): 659.4 ms  194 ops/s  idle=73.7%  steals=10.6/s  threshold=4  gpu_ops=0  cpu_ops=128
+[run] work-stealing/matmul-parallel(32x4,m=256) (8w): 634.5 ms  202 ops/s  idle=73.5%  steals=9.5/s  threshold=4  gpu_ops=0  cpu_ops=128  gpu_batches=0  avg_batch=0.0
 
-=== GPU A100 (job 60018340) ===
+=== GPU A100 (job 60026347) ===
 130 ops (2 sources, 128 compute), 256 edges
   matmul: 128
-[run] work-stealing/matmul-parallel(32x4,m=256) (8w): 862.4 ms  148 ops/s  idle=69.9%  steals=4.6/s  threshold=4  gpu_ops=128  cpu_ops=0
+[run] work-stealing/matmul-parallel(32x4,m=256) (8w): 868.9 ms  147 ops/s  idle=72.9%  steals=18.4/s  threshold=4  gpu_ops=128  cpu_ops=0  gpu_batches=8  avg_batch=14.0
 
-=== GPU A100 larger matrices (job 60018340) ===
+=== GPU A100 larger matrices (job 60026347) ===
 66 ops (2 sources, 64 compute), 128 edges
   matmul: 64
-[run] work-stealing/matmul-parallel(16x4,m=512) (8w): 810.1 ms  79 ops/s  idle=66.1%  steals=2.5/s  threshold=4  gpu_ops=64  cpu_ops=0
+[run] work-stealing/matmul-parallel(16x4,m=512) (8w): 854.9 ms  75 ops/s  idle=72.5%  steals=12.9/s  threshold=4  gpu_ops=64  cpu_ops=0  gpu_batches=8  avg_batch=6.6
 
-=== Auto routing - 2048x2048 (job 60018340) ===
+=== Auto routing - 2048x2048 (job 60026347) ===
 130 ops (2 sources, 128 compute), 256 edges
   matmul: 128
-[run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 2941.1 ms  44 ops/s  idle=25.4%  steals=2.7/s  threshold=4  gpu_ops=128  cpu_ops=0
-=== Auto routing - independent matmuls 2048x2048 ===
-66 ops (2 sources, 64 compute), 128 edges
-  matmul: 64
-[run] work-stealing/matmul-parallel(64x1,m=2048) (8w): 2698.9 ms  24 ops/s  idle=3.6%  steals=0.0/s  threshold=4  gpu_ops=64  cpu_ops=0
+[run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 3285.9 ms  39 ops/s  idle=57.0%  steals=8.2/s  threshold=4  gpu_ops=128  cpu_ops=0  gpu_batches=8  avg_batch=12.4
 
-[gpu-bench] finished: 2026-04-28T17:57:19-04:00
+[gpu-bench] finished: 2026-04-28T21:07:15-04:00

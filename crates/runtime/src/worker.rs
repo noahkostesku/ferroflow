@@ -59,6 +59,26 @@ impl WorkQueue {
             None
         }
     }
+
+    /// Atomically drains all items from the queue and returns them in FIFO order.
+    ///
+    /// Used by the GPU batch path: the worker drains its own queue, selects
+    /// which ops can form a batch, and calls [`push_front_bulk`] to re-enqueue
+    /// the remainder.
+    pub async fn drain_all(&self) -> Vec<OpId> {
+        self.inner.lock().await.drain(..).collect()
+    }
+
+    /// Pushes `ids` to the front of the queue, preserving their relative order.
+    ///
+    /// Used to re-enqueue ops that were drained but could not join the current
+    /// GPU batch.
+    pub async fn push_front_bulk(&self, ids: Vec<OpId>) {
+        let mut guard = self.inner.lock().await;
+        for id in ids.into_iter().rev() {
+            guard.push_front(id);
+        }
+    }
 }
 
 impl Default for WorkQueue {

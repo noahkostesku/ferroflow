@@ -99,10 +99,19 @@ pub struct SchedulerMetrics {
     /// Ops routed to CPU under the `auto` policy (0 for `AllCpu`/`AllGpu` runs).
     #[serde(default)]
     pub cpu_ops: u64,
+    /// Number of GPU batch submissions (0 when CUDA is not enabled or no GPU ops ran).
+    #[serde(default)]
+    pub gpu_batches: u64,
+    /// Average number of ops per GPU batch submission (0.0 when `gpu_batches == 0`).
+    #[serde(default)]
+    pub gpu_batch_size_avg: f64,
 }
 
 impl SchedulerMetrics {
     /// Constructs `SchedulerMetrics`, computing derived fields from raw values.
+    ///
+    /// `gpu_batch_size_total` is the sum of all batch sizes; `gpu_batch_size_avg`
+    /// is derived as `gpu_batch_size_total / gpu_batches` (0.0 when no batches ran).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         total_ops: u64,
@@ -115,6 +124,8 @@ impl SchedulerMetrics {
         threshold_adjustments: u64,
         gpu_ops: u64,
         cpu_ops: u64,
+        gpu_batches: u64,
+        gpu_batch_size_total: u64,
     ) -> Self {
         let elapsed_sec = elapsed_ms / 1000.0;
         let throughput_ops_per_sec = if elapsed_sec > 0.0 {
@@ -124,6 +135,11 @@ impl SchedulerMetrics {
         };
         let steal_rate = if elapsed_sec > 0.0 {
             successful_steals as f64 / elapsed_sec
+        } else {
+            0.0
+        };
+        let gpu_batch_size_avg = if gpu_batches > 0 {
+            gpu_batch_size_total as f64 / gpu_batches as f64
         } else {
             0.0
         };
@@ -140,6 +156,8 @@ impl SchedulerMetrics {
             threshold_adjustments,
             gpu_ops,
             cpu_ops,
+            gpu_batches,
+            gpu_batch_size_avg,
         }
     }
 }
@@ -182,7 +200,9 @@ impl fmt::Display for RunMetrics {
         writeln!(f, "threshold_final   : {}", m.threshold_final)?;
         writeln!(f, "threshold_adj     : {}", m.threshold_adjustments)?;
         writeln!(f, "gpu_ops           : {}", m.gpu_ops)?;
-        write!(f, "cpu_ops           : {}", m.cpu_ops)
+        writeln!(f, "cpu_ops           : {}", m.cpu_ops)?;
+        writeln!(f, "gpu_batches       : {}", m.gpu_batches)?;
+        write!(f, "avg_batch_size    : {:.1}", m.gpu_batch_size_avg)
     }
 }
 
@@ -191,7 +211,7 @@ mod tests {
     use super::*;
 
     fn sample_metrics() -> SchedulerMetrics {
-        SchedulerMetrics::new(20, 20, 50.0, 5.0, 8, 3, 2, 4, 0, 0)
+        SchedulerMetrics::new(20, 20, 50.0, 5.0, 8, 3, 2, 4, 0, 0, 0, 0)
     }
 
     fn sample_run() -> RunMetrics {
@@ -216,7 +236,7 @@ mod tests {
 
     #[test]
     fn zero_elapsed_no_divide_by_zero() {
-        let m = SchedulerMetrics::new(10, 10, 0.0, 0.0, 0, 0, 0, 0, 0, 0);
+        let m = SchedulerMetrics::new(10, 10, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0);
         assert_eq!(m.throughput_ops_per_sec, 0.0);
         assert_eq!(m.steal_rate, 0.0);
     }
@@ -256,5 +276,7 @@ mod tests {
         assert!(s.contains("threshold_adj"));
         assert!(s.contains("gpu_ops"));
         assert!(s.contains("cpu_ops"));
+        assert!(s.contains("gpu_batches"));
+        assert!(s.contains("avg_batch_size"));
     }
 }
