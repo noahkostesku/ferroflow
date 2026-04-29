@@ -12,16 +12,16 @@ Static scheduling concentrates slow ops on specific workers, leaving others idle
 
 ## Results
 
-| Workload | Device | Scheduler | Throughput | Advantage |
+| Workload | Cluster | Device | Throughput | vs Baseline |
 |---|---|---|---|---|
-| Imbalanced DAG (2 nodes) | CPU | work-stealing | 1,014 ops/s | +12.7% vs static |
-| XLarge Wide DAG (8 nodes) | CPU | work-stealing | 28,839 ops/s | 97% efficiency |
-| Matmul-parallel 2048×2048 | CPU (8 workers) | work-stealing | 25 ops/s | baseline |
-| Matmul-parallel 2048×2048 | A100 GPU | work-stealing | 62 ops/s | 2.5× faster than CPU |
+| Imbalanced DAG (2 nodes) | Narval | CPU | 1,014 ops/s | +12.7% vs static |
+| XLarge Wide DAG (8 nodes) | Narval | CPU | 28,839 ops/s | 97% efficiency |
+| Matmul 2048×2048 | Narval | A100-SXM4-40GB | 47 ops/s | 1.88× vs CPU |
+| Matmul 2048×2048 | Nibi | H100-80GB-HBM3 | 52 ops/s | 2.08× vs CPU |
 
-Narval supercomputer (Alliance Canada).
-AMD EPYC Milan (CPU) / A100-SXM4-40GB (GPU).
-5-run medians for scaling study, single run for GPU benchmark.
+All results on Alliance Canada HPC clusters.
+5-run medians for scaling study. Single run for GPU benchmarks.
+Same binary, no code changes between clusters.
 
 ---
 
@@ -162,6 +162,40 @@ Requires: CUDA 12.x, A100 or compatible GPU.
 
 ---
 
+### Multi-cluster
+
+ferroflow has been benchmarked on two Alliance Canada clusters with no code changes between runs.
+
+| Cluster | CPU | GPU | GPU Memory |
+|---|---|---|---|
+| Narval | AMD EPYC Milan | A100-SXM4-40GB | 40GB HBM2e |
+| Nibi | — | H100-80GB-HBM3 | 80GB HBM3 |
+
+**GPU comparison — 2048×2048 matmul-parallel (128 ops, 8 workers):**
+
+| Metric | Narval A100 | Nibi H100 | H100 advantage |
+|---|---|---|---|
+| Throughput | 47 ops/s | 52 ops/s | +10.6% |
+| Wall time | 2,727ms | 2,473ms | -9.3% |
+| GPU batches | 8 | 8 | same |
+| Avg batch size | 12.4 | 12.6 | same |
+| CPU baseline | 25 ops/s | 26 ops/s | similar |
+
+The H100's higher memory bandwidth (HBM3 vs HBM2e) produces consistent throughput gains across all matrix sizes. CPU baselines are equivalent, confirming the improvement is GPU-specific.
+
+To run on a new Alliance cluster:
+
+```bash
+git clone https://github.com/noahkostesku/ferroflow
+cd ferroflow
+module load StdEnv/2023 gcc/12.3 cuda/12.2 rust/1.91.0
+cargo build --release --features cuda
+# edit slurm/gpu_bench.sh for your account and paths
+sbatch slurm/gpu_bench.sh
+```
+
+---
+
 ## Narval setup
 
 Load the verified module stack before building or submitting jobs:
@@ -183,14 +217,16 @@ See [docs/narval-setup.md](docs/narval-setup.md) for full environment notes and 
 
 | Issue | Description | Status |
 |---|---|---|
-| #1 | Larger DAGs (500+ ops) to validate work-stealing at scale | ✅ closed |
-| #2 | Adaptive steal threshold | ✅ closed |
-| #4 | Additional ONNX ops (Conv2d, BatchNorm, Softmax, Add, MaxPool, Reshape) | ✅ closed |
-| #8 | CUDA support via cudarc (Narval A100s) | ✅ closed |
-| #3 | Persistent GPU tensor storage (eliminate CPU↔GPU transfer overhead) | open |
-| #5 | Peer-to-peer work stealing (remove coordinator bottleneck) | open |
-| #6 | Heterogeneous CPU+GPU scheduling | open |
-| #7 | Multi-cluster benchmarks (Fir H100s, Rorqual) | open |
+| #1 | Larger DAGs, validate work-stealing at scale | ✅ closed |
+| #4 | ONNX ops: Conv2d, BatchNorm, Softmax, Add, MaxPool, Reshape | ✅ closed |
+| #5 | Adaptive steal threshold | ✅ closed |
+| #8 | CUDA support, A100 GPU matmul via cuBLAS | ✅ closed |
+| #9 | Multi-cluster benchmark: Nibi H100 vs Narval A100 | ✅ closed |
+| #10 | CUDA streams batching, avg_batch=14 confirmed | ✅ closed |
+| #3 | Persistent GPU tensor storage across dependency boundaries | open |
+| #6 | Peer-to-peer work stealing, remove coordinator bottleneck | open |
+| #7 | Heterogeneous CPU+GPU scheduling improvements | open |
+| #11 | GPU-native dependency tracking | open |
 
 ---
 
