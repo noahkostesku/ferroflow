@@ -13,6 +13,8 @@ const DEFAULT_STEAL_THRESHOLD: usize = 2;
 const RECENT_VICTIM_WINDOW: usize = 3;
 const P2P_MAX_BACKOFF_MS: u64 = 50;
 const P2P_INITIAL_BACKOFF_MS: u64 = 1;
+/// Maximum time to wait for a steal response before abandoning the attempt.
+const STEAL_RESPONSE_TIMEOUT_MS: u64 = 100;
 /// Maximum ops dispatched per worker before coordinator waits for results.
 ///
 /// Prevents the coordinator from flooding all initially-ready ops to workers in
@@ -59,6 +61,9 @@ enum MpiMsg {
     // ── P2P work-stealing ─────────────────────────────────────────────────────
     /// Coordinator pushes a newly-ready op directly to a worker (P2P mode only).
     P2POpAssignment { op_id: OpId, op: Op, inputs: Vec<Tensor> },
+    /// Worker has exhausted P2P stealing for longer than the idle threshold and
+    /// is now blocking on rank 0, waiting for a direct op assignment or Shutdown.
+    P2PIdleNotification { rank: i32 },
     /// Step 1 of the two-way handshake: thief asks victim for an op.
     P2PStealRequest { from_rank: i32, request_id: u64 },
     /// Step 2: victim replies with an op (or `None` if its queue is too short).
@@ -92,6 +97,8 @@ pub struct MpiWorker {
     source_tensors: HashMap<OpId, Tensor>,
     mode: MpiSchedulerMode,
     p2p_debug: bool,
+    /// Idle duration after which a P2P worker falls back to coordinator dispatch.
+    p2p_idle_threshold_ms: u64,
 }
 
 impl MpiWorker {
@@ -102,7 +109,21 @@ impl MpiWorker {
             source_tensors,
             mode: MpiSchedulerMode::WorkStealing,
             p2p_debug: false,
+            p2p_idle_threshold_ms: 5,
         }
+    }
+
+    /// Sets how long a P2P worker stays idle before falling back to coordinator dispatch.
+    ///
+    /// When a worker's queue is empty and all P2P steal attempts have failed for
+    /// longer than `ms` milliseconds, it sends a `P2PIdleNotification` to rank 0
+    /// and blocks until the coordinator pushes a ready op directly.  This prevents
+    /// livelock on serial DAGs where no peer ever holds a stealable op.
+    ///
+    /// Default: 5 ms.  Corresponds to `--p2p-idle-threshold` on the CLI.
+    pub fn with_p2p_idle_threshold(mut self, ms: u64) -> Self {
+        self.p2p_idle_threshold_ms = ms;
+        self
     }
 
     /// Overrides the dispatch strategy.
@@ -147,8 +168,14 @@ impl MpiWorker {
                         .context("coordinator loop failed")?
                 }
                 MpiSchedulerMode::P2PWorkStealing => {
-                    p2p_coordinator_loop(&world, self.dag, self.source_tensors, n_ranks)
-                        .context("P2P coordinator loop failed")?
+                    p2p_coordinator_loop(
+                        &world,
+                        self.dag,
+                        self.source_tensors,
+                        n_ranks,
+                        self.p2p_debug,
+                    )
+                    .context("P2P coordinator loop failed")?
                 }
             };
             Ok(Some((results, metrics)))
@@ -158,8 +185,14 @@ impl MpiWorker {
                     worker_loop(&world, rank, self.mode).context("worker loop failed")?;
                 }
                 MpiSchedulerMode::P2PWorkStealing => {
-                    p2p_worker_loop(&world, rank, n_ranks, self.p2p_debug)
-                        .context("P2P worker loop failed")?;
+                    p2p_worker_loop(
+                        &world,
+                        rank,
+                        n_ranks,
+                        self.p2p_debug,
+                        Duration::from_millis(self.p2p_idle_threshold_ms),
+                    )
+                    .context("P2P worker loop failed")?;
                 }
             }
             Ok(None)
@@ -257,12 +290,17 @@ impl PeerDirectory {
 /// Dispatches ops to workers in round-robin order with a per-worker-inflight
 /// window of `MAX_WORKER_INFLIGHT`.  The cap prevents flooding all initially-
 /// ready ops at once, which would serialise on MPI rendezvous for large tensors.
-/// Coordinator only tracks dependency resolution — it never mediates P2P steals.
+///
+/// Also handles `P2PIdleNotification`: when a worker has failed to steal for
+/// longer than the idle threshold it parks here and the coordinator wakes it
+/// directly once a dependency unlocks a new op.  This prevents the livelock that
+/// occurs on serial DAGs when all workers exhaust P2P stealing simultaneously.
 fn p2p_coordinator_loop<C: Communicator>(
     world: &C,
     dag: Arc<Dag>,
     source_tensors: HashMap<OpId, Tensor>,
     n_ranks: usize,
+    p2p_debug: bool,
 ) -> anyhow::Result<(HashMap<OpId, Tensor>, SchedulerMetrics)> {
     let n_workers = n_ranks - 1;
     let dispatch_cap = n_workers * MAX_WORKER_INFLIGHT;
@@ -284,6 +322,9 @@ fn p2p_coordinator_loop<C: Communicator>(
     let mut completed_compute = 0usize;
 
     enqueue_ready(&dag, &completed, &dispatched, &mut ready_queue);
+
+    // Ranks of workers that sent P2PIdleNotification and are blocking on us.
+    let mut idle_workers: VecDeque<i32> = VecDeque::new();
 
     let t0 = Instant::now();
 
@@ -310,41 +351,100 @@ fn p2p_coordinator_loop<C: Communicator>(
         let (msg, _src) = mpi_recv_any(world)?;
         coordinator_messages += 1;
 
-        if let MpiMsg::OpResult { op_id, tensor } = msg {
-            tensor_store.insert(op_id, tensor);
-            completed.insert(op_id);
-            if total_inflight > 0 {
-                total_inflight -= 1;
-            }
-            completed_compute += 1;
+        match msg {
+            MpiMsg::OpResult { op_id, tensor } => {
+                tensor_store.insert(op_id, tensor);
+                completed.insert(op_id);
+                if total_inflight > 0 {
+                    total_inflight -= 1;
+                }
+                completed_compute += 1;
 
-            enqueue_ready(&dag, &completed, &dispatched, &mut ready_queue);
-            while total_inflight < dispatch_cap {
-                if let Some(new_op_id) = ready_queue.pop_front() {
-                    let target_rank = (worker_cursor % n_workers) as i32 + 1;
-                    worker_cursor += 1;
+                enqueue_ready(&dag, &completed, &dispatched, &mut ready_queue);
+
+                // Fill inflight cap — wake parked idle workers before using round-robin.
+                while total_inflight < dispatch_cap {
+                    let op_id = match ready_queue.pop_front() {
+                        Some(id) => id,
+                        None => break,
+                    };
+                    let target_rank = if let Some(idle) = idle_workers.pop_front() {
+                        if p2p_debug {
+                            eprintln!(
+                                "[p2p-debug] coordinator waking rank={idle} with op={op_id}"
+                            );
+                        }
+                        idle
+                    } else {
+                        let r = (worker_cursor % n_workers) as i32 + 1;
+                        worker_cursor += 1;
+                        r
+                    };
                     let op = dag
-                        .get_op(new_op_id)
-                        .ok_or_else(|| anyhow::anyhow!("op {new_op_id} missing from DAG"))?
+                        .get_op(op_id)
+                        .ok_or_else(|| anyhow::anyhow!("op {op_id} missing from DAG"))?
                         .clone();
                     let inputs =
                         op.input_ids.iter().map(|&dep| tensor_store[&dep].clone()).collect();
-                    mpi_send(world, target_rank, &MpiMsg::P2POpAssignment {
-                        op_id: new_op_id,
-                        op,
-                        inputs,
-                    })?;
-                    dispatched.insert(new_op_id);
+                    mpi_send(world, target_rank, &MpiMsg::P2POpAssignment { op_id, op, inputs })?;
+                    dispatched.insert(op_id);
                     total_inflight += 1;
                     coordinator_messages += 1;
-                } else {
+                }
+
+                if completed_compute >= total_compute && total_inflight == 0 {
                     break;
                 }
             }
 
-            if completed_compute >= total_compute && total_inflight == 0 {
-                break;
+            // Worker exhausted P2P stealing — it is blocking, waiting for a direct
+            // assignment.  Try to satisfy it immediately from the ready queue; if no
+            // op is ready yet, park the rank in `idle_workers` so it gets the next
+            // op that unlocks.
+            MpiMsg::P2PIdleNotification { rank } => {
+                if p2p_debug {
+                    eprintln!(
+                        "[p2p-debug] coordinator received idle from rank={rank}, \
+                         ready_ops={} queued={}",
+                        ready_queue.len(),
+                        idle_workers.len()
+                    );
+                }
+                idle_workers.push_back(rank);
+
+                while total_inflight < dispatch_cap {
+                    let op_id = match ready_queue.pop_front() {
+                        Some(id) => id,
+                        None => break,
+                    };
+                    let target_rank = match idle_workers.pop_front() {
+                        Some(r) => {
+                            if p2p_debug {
+                                eprintln!(
+                                    "[p2p-debug] coordinator waking rank={r} with op={op_id}"
+                                );
+                            }
+                            r
+                        }
+                        None => {
+                            ready_queue.push_front(op_id);
+                            break;
+                        }
+                    };
+                    let op = dag
+                        .get_op(op_id)
+                        .ok_or_else(|| anyhow::anyhow!("op {op_id} missing from DAG"))?
+                        .clone();
+                    let inputs =
+                        op.input_ids.iter().map(|&dep| tensor_store[&dep].clone()).collect();
+                    mpi_send(world, target_rank, &MpiMsg::P2POpAssignment { op_id, op, inputs })?;
+                    dispatched.insert(op_id);
+                    total_inflight += 1;
+                    coordinator_messages += 1;
+                }
             }
+
+            _ => {}
         }
     }
 
@@ -410,6 +510,33 @@ fn p2p_coordinator_loop<C: Communicator>(
 
 // ── P2P worker (ranks 1..N) ───────────────────────────────────────────────────
 
+/// Non-blocking poll for an MPI message, giving up once `deadline` passes.
+///
+/// Uses `immediate_probe` in a 1 ms sleep loop so the caller thread is not
+/// pinned to 100 % CPU while waiting.  Returns `None` on timeout so the
+/// caller can take corrective action (abandon a pending steal, retry after
+/// backoff, etc.) rather than blocking forever.
+///
+/// # Errors
+/// Returns an error if MPI receive or deserialisation fails.
+fn poll_message_until<C: Communicator>(
+    world: &C,
+    deadline: Instant,
+) -> anyhow::Result<Option<(MpiMsg, i32)>> {
+    loop {
+        if let Some(status) = world.any_process().immediate_probe() {
+            let src = status.source_rank();
+            let (bytes, _) = world.process_at_rank(src).receive_vec::<u8>();
+            let msg = bincode::deserialize(&bytes).context("MpiMsg deserialize")?;
+            return Ok(Some((msg, src)));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// Pending steal this worker initiated (thief role), awaiting the victim's response.
 struct PendingSteal {
     request_id: u64,
@@ -420,17 +547,29 @@ struct PendingSteal {
 /// P2P worker loop — handles coordinator assignments, serves steal requests from
 /// peers, and steals from peers when its own queue is empty.
 ///
+/// **Startup phase**: the worker blocks waiting for the coordinator's first
+/// `P2POpAssignment` before it ever enters the steal loop.  This eliminates the
+/// spurious steal-failure burst visible in `--p2p-debug` output when all workers
+/// race to steal from each other before the coordinator's initial dispatch arrives.
+///
 /// **Two-way handshake**: victim pops the op and sends it in one message.
 /// No Ack round-trip is needed, halving steal latency vs the original three-way design.
 ///
 /// **Timestamp backoff**: failed steals set `next_steal_at` instead of sleeping,
-/// so the worker remains in `mpi_recv_any` and processes incoming assignments
+/// so the worker remains in the poll loop and processes incoming assignments
 /// immediately during the backoff window.
+///
+/// **Coordinator fallback**: if the worker has been idle for longer than
+/// `idle_threshold` it sends `P2PIdleNotification` to rank 0 and blocks on a
+/// `mpi_recv_any`.  The coordinator wakes it with a direct `P2POpAssignment`
+/// once a dependency resolves.  This breaks the livelock on serial DAGs where
+/// all workers exhaust stealing simultaneously.
 fn p2p_worker_loop<C: Communicator>(
     world: &C,
     rank: i32,
     n_ranks: usize,
     p2p_debug: bool,
+    idle_threshold: Duration,
 ) -> anyhow::Result<()> {
     let mut local_queue: VecDeque<(OpId, Op, Vec<Tensor>)> = VecDeque::new();
     let mut peer_dir = PeerDirectory::new(rank, n_ranks);
@@ -448,6 +587,58 @@ fn p2p_worker_loop<C: Communicator>(
     let mut steal_latency_count = 0u64;
     let mut next_request_id: u64 = (rank as u64) << 32; // rank-scoped IDs; no collisions
 
+    // ── Phase 1: startup — block until coordinator sends first op ─────────────
+    //
+    // Workers must not steal from peers before receiving initial work.  Without
+    // this guard every worker immediately tries to steal from every other worker,
+    // all fail (queues are universally empty), and the 100 ms steal timeout plus
+    // the 5 ms idle threshold fire before the coordinator's first dispatch even
+    // lands — producing the "steal failed" lines at t≈2 ms seen in --p2p-debug.
+    'startup: loop {
+        let (msg, _) = mpi_recv_any(world)?;
+        match msg {
+            MpiMsg::P2POpAssignment { op_id, op, inputs } => {
+                if p2p_debug {
+                    eprintln!("[p2p-debug] rank={rank} received initial op from coordinator");
+                }
+                local_queue.push_back((op_id, op, inputs));
+                break 'startup;
+            }
+            MpiMsg::P2PStealRequest { from_rank, request_id } => {
+                // Queue is empty during startup — respond None immediately so
+                // the requesting peer is not left waiting.
+                mpi_send(
+                    world,
+                    from_rank,
+                    &MpiMsg::P2PStealResponse {
+                        request_id,
+                        op_id: None,
+                        op: None,
+                        inputs: None,
+                    },
+                )?;
+            }
+            MpiMsg::Shutdown => {
+                // DAG completed before this worker received any work (possible
+                // when n_workers > number of initially ready ops and the DAG
+                // finishes before round-robin dispatch reaches this rank).
+                mpi_send(
+                    world,
+                    0,
+                    &MpiMsg::P2PMetrics {
+                        idle_time_ms: 0.0,
+                        p2p_steals_attempted: 0,
+                        p2p_steals_successful: 0,
+                        p2p_steal_latency_ms: 0.0,
+                    },
+                )?;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    // ── Phase 2: normal P2P steal loop ───────────────────────────────────────
     loop {
         // ── execute local work ────────────────────────────────────────────────
         if let Some((op_id, op, inputs)) = local_queue.pop_front() {
@@ -465,6 +656,72 @@ fn p2p_worker_loop<C: Communicator>(
         // ── queue empty — track idle ──────────────────────────────────────────
         if idle_start.is_none() {
             idle_start = Some(Instant::now());
+        }
+
+        // Check idle threshold on every iteration, not only in the poll-timeout
+        // arm.  Steal responses arrive as Some(m) via poll_message_until and
+        // never hit the timeout path, so the threshold must be evaluated here.
+        if idle_start.map_or(false, |t| t.elapsed() >= idle_threshold) {
+            if p2p_debug {
+                let ms = idle_start.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+                eprintln!(
+                    "[p2p-debug] rank={rank} idle for {ms:.1}ms, sending idle notification"
+                );
+            }
+            pending_steal = None;
+            next_steal_at = None;
+            backoff = Duration::from_millis(P2P_INITIAL_BACKOFF_MS);
+            mpi_send(world, 0, &MpiMsg::P2PIdleNotification { rank })?;
+            if p2p_debug {
+                eprintln!("[p2p-debug] rank={rank} sent idle notification to coordinator");
+            }
+            'coordinator_wait: loop {
+                let (park_msg, _) = mpi_recv_any(world)?;
+                match park_msg {
+                    MpiMsg::P2POpAssignment { op_id, op, inputs } => {
+                        local_queue.push_back((op_id, op, inputs));
+                        if let Some(start) = idle_start.take() {
+                            idle_time_ms += start.elapsed().as_secs_f64() * 1000.0;
+                        }
+                        break 'coordinator_wait;
+                    }
+                    MpiMsg::P2PStealRequest { from_rank, request_id } => {
+                        mpi_send(
+                            world,
+                            from_rank,
+                            &MpiMsg::P2PStealResponse {
+                                request_id,
+                                op_id: None,
+                                op: None,
+                                inputs: None,
+                            },
+                        )?;
+                    }
+                    MpiMsg::Shutdown => {
+                        if let Some(start) = idle_start.take() {
+                            idle_time_ms += start.elapsed().as_secs_f64() * 1000.0;
+                        }
+                        let avg_latency = if steal_latency_count > 0 {
+                            steal_latency_sum_ms / steal_latency_count as f64
+                        } else {
+                            0.0
+                        };
+                        mpi_send(
+                            world,
+                            0,
+                            &MpiMsg::P2PMetrics {
+                                idle_time_ms,
+                                p2p_steals_attempted,
+                                p2p_steals_successful,
+                                p2p_steal_latency_ms: avg_latency,
+                            },
+                        )?;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+            continue;
         }
 
         // ── initiate steal if no pending steal and backoff has expired ────────
@@ -489,10 +746,52 @@ fn p2p_worker_loop<C: Communicator>(
             }
         }
 
-        // ── block on next message from any source ─────────────────────────────
-        // `any_process().receive_vec` means incoming coordinator assignments are
-        // processed immediately even while we are waiting for a steal response.
-        let (msg, _src_rank) = mpi_recv_any(world)?;
+        // ── wait for next message — with a timeout when either a steal response
+        // is pending or a backoff window is active ──────────────────────────────
+        //
+        // Uses non-blocking probe so that the worker wakes on deadline expiry and
+        // can re-initiate stealing or fall back to coordinator dispatch.  A fully
+        // blocking mpi_recv_any() here would stall once all backoff timers fire
+        // and nobody has messages left to send — the coordinator is also blocked
+        // waiting for an OpResult, completing the deadlock.
+        let poll_deadline: Option<Instant> = {
+            let steal_timeout = pending_steal
+                .as_ref()
+                .map(|ps| ps.sent_at + Duration::from_millis(STEAL_RESPONSE_TIMEOUT_MS));
+            [steal_timeout, next_steal_at].into_iter().flatten().min()
+        };
+
+        // Shared timeout handler: clears pending steal and accumulates backoff.
+        // Returns true if the coordinator-fallback path should be entered.
+        // Defined as a labeled block so we can `break` to the outer match arm.
+        let (msg, _src_rank) = match poll_deadline {
+            // No deadline — safe to block; coordinator or a peer will send soon.
+            None => mpi_recv_any(world)?,
+
+            Some(deadline) => {
+                let poll_result = if Instant::now() >= deadline {
+                    None // already expired — skip the probe
+                } else {
+                    poll_message_until(world, deadline)?
+                };
+
+                match poll_result {
+                    // Got a message — hand it to the match below.
+                    Some(m) => m,
+
+                    // Timed out: clean up pending steal, check idle threshold.
+                    None => {
+                        if let Some(ps) = pending_steal.take() {
+                            peer_dir.record_outcome(ps.victim_rank, false);
+                            next_steal_at = Some(Instant::now() + backoff);
+                            backoff =
+                                (backoff * 2).min(Duration::from_millis(P2P_MAX_BACKOFF_MS));
+                        }
+                        continue;
+                    }
+                }
+            }
+        };
 
         match msg {
             // ── coordinator pushes a new op ───────────────────────────────────
@@ -504,31 +803,29 @@ fn p2p_worker_loop<C: Communicator>(
 
             // ── peer wants to steal from us (victim role) ─────────────────────
             // Two-way: pop the op now and send it; no Ack needed.
+            // Always respond immediately — even when the queue is too short —
+            // so the thief is never left waiting for a response that won't come.
             MpiMsg::P2PStealRequest { from_rank, request_id } => {
-                if local_queue.len() > steal_threshold {
-                    let (oid, op, inputs) = local_queue.pop_back().unwrap();
-                    mpi_send(
-                        world,
-                        from_rank,
-                        &MpiMsg::P2PStealResponse {
-                            request_id,
-                            op_id: Some(oid),
-                            op: Some(op),
-                            inputs: Some(inputs),
-                        },
-                    )?;
+                let stolen = if local_queue.len() > steal_threshold {
+                    local_queue.pop_back()
                 } else {
-                    mpi_send(
-                        world,
-                        from_rank,
-                        &MpiMsg::P2PStealResponse {
-                            request_id,
-                            op_id: None,
-                            op: None,
-                            inputs: None,
-                        },
-                    )?;
-                }
+                    None
+                };
+                let response = match stolen {
+                    Some((oid, op, inputs)) => MpiMsg::P2PStealResponse {
+                        request_id,
+                        op_id: Some(oid),
+                        op: Some(op),
+                        inputs: Some(inputs),
+                    },
+                    None => MpiMsg::P2PStealResponse {
+                        request_id,
+                        op_id: None,
+                        op: None,
+                        inputs: None,
+                    },
+                };
+                mpi_send(world, from_rank, &response)?;
             }
 
             // ── victim replied to our steal (thief role) ──────────────────────

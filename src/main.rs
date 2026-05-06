@@ -182,6 +182,12 @@ enum Command {
         /// Print per-steal timing to stderr (P2P mode only; useful for diagnosing latency).
         #[arg(long)]
         p2p_debug: bool,
+        /// Milliseconds a P2P worker may stay idle (queue empty, all steals failing)
+        /// before falling back to coordinator-mediated dispatch.  Lower values reduce
+        /// latency on serial DAGs; higher values give P2P stealing more time to work
+        /// on parallel ones.  Default: 5 ms.
+        #[arg(long, default_value = "5")]
+        p2p_idle_threshold: u64,
         /// Device policy: "cpu" (default), "cuda"/"cuda:N" (requires cuda feature),
         /// or "auto" (routes matmul≥threshold and conv2d to GPU, elementwise to CPU).
         #[arg(long, default_value = "cpu")]
@@ -733,6 +739,7 @@ async fn run_model(
     policy: DevicePolicy,
     p2p_stealing: bool,
     p2p_debug: bool,
+    p2p_idle_threshold: u64,
     p: &SyntheticDagParams,
 ) -> Result<()> {
     let (arc_dag, sources, is_skew, label) = match (model, dag) {
@@ -807,6 +814,7 @@ async fn run_model(
         match MpiWorker::new(Arc::clone(&arc_dag), sources.clone())
             .with_mode(MpiSchedulerMode::P2PWorkStealing)
             .with_p2p_debug(p2p_debug)
+            .with_p2p_idle_threshold(p2p_idle_threshold)
             .run()
             .context("MPI P2P worker failed")?
         {
@@ -842,7 +850,7 @@ async fn run_model(
 
     // Suppress unused-variable warnings when distributed feature is disabled.
     #[cfg(not(feature = "distributed"))]
-    let _ = (p2p_stealing, p2p_debug);
+    let _ = (p2p_stealing, p2p_debug, p2p_idle_threshold);
 
     // ── local scheduler path ──────────────────────────────────────────────────
     let (sched_name, m) = match scheduler {
@@ -981,6 +989,7 @@ async fn main() -> Result<()> {
             p2p_stealing,
             no_p2p_stealing,
             p2p_debug,
+            p2p_idle_threshold,
             device: device_str,
             gpu_matmul_threshold,
             seq_len,
@@ -1033,6 +1042,7 @@ async fn main() -> Result<()> {
                 policy,
                 use_p2p,
                 p2p_debug,
+                p2p_idle_threshold,
                 &p,
             )
             .await?;
