@@ -185,8 +185,8 @@ enum Command {
         /// Milliseconds a P2P worker may stay idle (queue empty, all steals failing)
         /// before falling back to coordinator-mediated dispatch.  Lower values reduce
         /// latency on serial DAGs; higher values give P2P stealing more time to work
-        /// on parallel ones.  Default: 5 ms.
-        #[arg(long, default_value = "5")]
+        /// on parallel ones.  Default: 1000 ms.
+        #[arg(long, default_value = "1000")]
         p2p_idle_threshold: u64,
         /// Device policy: "cpu" (default), "cuda"/"cuda:N" (requires cuda feature),
         /// or "auto" (routes matmul≥threshold and conv2d to GPU, elementwise to CPU).
