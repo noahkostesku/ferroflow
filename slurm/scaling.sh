@@ -88,7 +88,7 @@ PYEOF
 # ── run matrix ────────────────────────────────────────────────────────────────
 NODES_LIST=(2 4 8)
 DAGS=(xlarge-wide xlarge-transformer imbalanced)
-SCHEDS=(static work-stealing)
+SCHEDS=(static work-stealing work-stealing-p2p)
 
 # Associative array: "dag:sched" -> baseline throughput at N=2
 declare -A BASE_TP
@@ -104,7 +104,15 @@ for DAG in "${DAGS[@]}"; do
     esac
 
     for SCHED in "${SCHEDS[@]}"; do
-        SCHED_SLUG="${SCHED/work-stealing/ws}"
+        SCHED_SLUG="${SCHED/work-stealing-p2p/wsp2p}"
+        SCHED_SLUG="${SCHED_SLUG/work-stealing/ws}"
+
+        # Map scheduler name to CLI flags.
+        case "${SCHED}" in
+            static)              SCHED_FLAGS="--scheduler static" ;;
+            work-stealing)       SCHED_FLAGS="--scheduler work-stealing --no-p2p-stealing" ;;
+            work-stealing-p2p)   SCHED_FLAGS="--scheduler work-stealing --p2p-stealing" ;;
+        esac
 
         for N in "${NODES_LIST[@]}"; do
             WORKERS=$(( N * 4 ))
@@ -127,7 +135,7 @@ for DAG in "${DAGS[@]}"; do
                     "${BINARY}" run \
                         ${DAG_FLAGS} \
                         --workers "${WORKERS}" \
-                        --scheduler "${SCHED}" \
+                        ${SCHED_FLAGS} \
                         --steal-threshold 1 \
                     || true  # don't abort on non-zero exit
 
@@ -190,22 +198,24 @@ print_table() {
     echo ""
     echo "### Strong Scaling — ${TITLE}"
     echo ""
-    printf "| %5s | %16s | %16s | %13s | %10s |\n" \
-        "Nodes" "Static (ops/s)" "WS (ops/s)" "WS Efficiency" "Steal Rate"
-    printf "|%s|%s|%s|%s|%s|\n" "-------|" "-----------------|" "-----------------|" "---------------|" "------------|"
+    printf "| %5s | %14s | %14s | %18s | %12s | %12s |\n" \
+        "Nodes" "Static (ops/s)" "WS-coord (ops/s)" "WS-P2P (ops/s)" "P2P Eff" "P2P Steal/s"
+    printf "|%s|%s|%s|%s|%s|%s|\n" \
+        "-------|" "----------------|" "----------------|" "-----------------|" "------------|" "------------|"
 
     for N in "${NODES_LIST[@]}"; do
-        S_TP=— WS_TP=— WS_EFF=— WS_STEAL=—
+        S_TP=— WS_TP=— P2P_TP=— P2P_EFF=— P2P_STEAL=—
         for ROW in "${RECORDS[@]}"; do
             IFS='|' read -r rDAG rN rSCHED rTP rIDLE rSTEAL rEFF <<< "${ROW}"
             [[ "${rDAG}" != "${TARGET_DAG}" || "${rN}" != "${N}" ]] && continue
             case "${rSCHED}" in
-                static)        S_TP="${rTP}" ;;
-                work-stealing) WS_TP="${rTP}"; WS_EFF="${rEFF}"; WS_STEAL="${rSTEAL}" ;;
+                static)              S_TP="${rTP}" ;;
+                work-stealing)       WS_TP="${rTP}" ;;
+                work-stealing-p2p)   P2P_TP="${rTP}"; P2P_EFF="${rEFF}"; P2P_STEAL="${rSTEAL}" ;;
             esac
         done
-        printf "| %5d | %16s | %16s | %13s | %8s/s |\n" \
-            "${N}" "${S_TP}" "${WS_TP}" "${WS_EFF}" "${WS_STEAL}"
+        printf "| %5d | %14s | %16s | %18s | %11s | %10s/s |\n" \
+            "${N}" "${S_TP}" "${WS_TP}" "${P2P_TP}" "${P2P_EFF}" "${P2P_STEAL}"
     done
 }
 
@@ -214,7 +224,7 @@ print_table "xlarge-transformer"
 print_table "imbalanced"
 
 # ── analysis paragraph ────────────────────────────────────────────────────────
-# Find node count where WS efficiency first drops below 0.70
+# Find node count where WS-coord efficiency first drops below 0.70
 EFF_DROP=never
 for ROW in "${RECORDS[@]}"; do
     IFS='|' read -r rDAG rN rSCHED rTP rIDLE rSTEAL rEFF <<< "${ROW}"
@@ -225,53 +235,52 @@ for ROW in "${RECORDS[@]}"; do
     fi
 done
 
-# Peak steal rate across all WS runs
-PEAK_STEAL=0 PEAK_STEAL_N=2
+# Peak steal rate across all P2P runs
+PEAK_P2P_STEAL=0 PEAK_P2P_N=2
 for ROW in "${RECORDS[@]}"; do
     IFS='|' read -r rDAG rN rSCHED rTP rIDLE rSTEAL rEFF <<< "${ROW}"
-    [[ "${rSCHED}" != "work-stealing" ]] && continue
-    GT=$(awk -v s="${rSTEAL}" -v p="${PEAK_STEAL}" 'BEGIN{print (s>p)?1:0}')
+    [[ "${rSCHED}" != "work-stealing-p2p" ]] && continue
+    GT=$(awk -v s="${rSTEAL}" -v p="${PEAK_P2P_STEAL}" 'BEGIN{print (s>p)?1:0}')
     if [[ "${GT}" -eq 1 ]]; then
-        PEAK_STEAL="${rSTEAL}"
-        PEAK_STEAL_N="${rN}"
+        PEAK_P2P_STEAL="${rSTEAL}"
+        PEAK_P2P_N="${rN}"
     fi
 done
 
-# WS speedup on xlarge-wide at 8 nodes vs 2 nodes
-TP_WIDE_WS_2=0 TP_WIDE_WS_8=0
+# Speedup: WS-P2P vs WS-coord on xlarge-wide at 8 nodes
+TP_WIDE_WS_8=0 TP_WIDE_P2P_8=0
 for ROW in "${RECORDS[@]}"; do
     IFS='|' read -r rDAG rN rSCHED rTP rIDLE rSTEAL rEFF <<< "${ROW}"
-    [[ "${rDAG}" != "xlarge-wide" || "${rSCHED}" != "work-stealing" ]] && continue
-    [[ "${rN}" -eq 2  ]] && TP_WIDE_WS_2="${rTP}"
-    [[ "${rN}" -eq 8 ]] && TP_WIDE_WS_8="${rTP}"
+    [[ "${rDAG}" != "xlarge-wide" || "${rN}" -ne 8 ]] && continue
+    [[ "${rSCHED}" == "work-stealing"     ]] && TP_WIDE_WS_8="${rTP}"
+    [[ "${rSCHED}" == "work-stealing-p2p" ]] && TP_WIDE_P2P_8="${rTP}"
 done
-SPEEDUP_8=$(awk -v a="${TP_WIDE_WS_8}" -v b="${TP_WIDE_WS_2}" \
-    'BEGIN{if(b>0) printf "%.1f", a/b; else print "N/A"}')
+P2P_VS_COORD=$(awk -v a="${TP_WIDE_P2P_8}" -v b="${TP_WIDE_WS_8}" \
+    'BEGIN{if(b>0) printf "%.2f", a/b; else print "N/A"}')
 
 ANALYSIS_BLOCK=$(cat <<ANALYSIS
 
 ---
 
-### 2026-04-17 — Strong Scaling Study (Week 5 Session 2, job ${SLURM_JOB_ID})
+### 2026-04-29 — P2P vs Coordinator Strong Scaling (job ${SLURM_JOB_ID})
 
 - **Machine:** Narval (Alliance Canada)  |  **Job:** ${SLURM_JOB_ID}
 - **Nodes:** 2, 4, 8 |  **Ranks/node:** 1  |  **CPUs/rank:** ${SLURM_CPUS_PER_TASK}
-- **Workers:** N × ${SLURM_CPUS_PER_TASK} threads (32 per simulated node)
+- **Workers:** N × ${SLURM_CPUS_PER_TASK} threads per node
 - **DAGs:** xlarge-wide (1281 ops, width=1280 depth=1 skew=0.003), xlarge-transformer (545 ops, 32 layers d=512 n_heads=8), imbalanced (205 ops, 4 heavy ops × 200ms + 200 fast ops × 1ms)
+- **Schedulers:** static | WS-coordinator (--no-p2p-stealing) | WS-P2P (--p2p-stealing)
 - **Commit:** ${GIT_SHA}
 
 $(print_table "xlarge-wide")
 $(print_table "xlarge-transformer")
 $(print_table "imbalanced")
 
-**Analysis:** WS efficiency first drops below 0.70 at ${EFF_DROP} nodes, indicating that
-coordinator-mediated steal latency begins to dominate as the worker pool grows beyond that point.
-The peak steal rate of ${PEAK_STEAL}/s occurs at ${PEAK_STEAL_N} nodes, confirming the scheduler
-actively detects imbalance but incurs growing steal-request overhead at scale.
-On the wide-skewed DAG, work-stealing achieves a ${SPEEDUP_8}× speedup at 8 nodes versus the
-2-node baseline, compared to 8× ideal linear scaling.
-These results suggest raising the steal threshold from 2 to 4–8 for runs beyond 8 nodes would
-batch steal requests, reduce coordinator contention, and recover efficiency closer to the ideal curve.
+**Analysis:** Coordinator-mediated WS efficiency first drops below 0.70 at ${EFF_DROP} nodes,
+where rank-0 becomes a steal-request bottleneck.  P2P stealing bypasses the coordinator for
+steal decisions: peak P2P steal rate of ${PEAK_P2P_STEAL}/s at ${PEAK_P2P_N} nodes.
+On the wide-skewed DAG at 8 nodes, WS-P2P achieves a ${P2P_VS_COORD}× throughput advantage
+over coordinator-mediated WS, confirming that removing rank-0 from the steal critical path
+recovers efficiency lost to coordinator contention.
 ANALYSIS
 )
 

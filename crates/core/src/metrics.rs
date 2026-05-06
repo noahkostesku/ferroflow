@@ -105,6 +105,18 @@ pub struct SchedulerMetrics {
     /// Average number of ops per GPU batch submission (0.0 when `gpu_batches == 0`).
     #[serde(default)]
     pub gpu_batch_size_avg: f64,
+    /// P2P steal attempts across all worker ranks (0 for coordinator-mediated runs).
+    #[serde(default)]
+    pub p2p_steals_attempted: u64,
+    /// P2P steals that successfully transferred an op.
+    #[serde(default)]
+    pub p2p_steals_successful: u64,
+    /// Average round-trip latency for P2P steal handshakes in milliseconds (0 when no P2P).
+    #[serde(default)]
+    pub p2p_steal_latency_ms: f64,
+    /// Total MPI messages sent by the coordinator (drops significantly with P2P).
+    #[serde(default)]
+    pub coordinator_messages: u64,
 }
 
 impl SchedulerMetrics {
@@ -158,7 +170,30 @@ impl SchedulerMetrics {
             cpu_ops,
             gpu_batches,
             gpu_batch_size_avg,
+            p2p_steals_attempted: 0,
+            p2p_steals_successful: 0,
+            p2p_steal_latency_ms: 0.0,
+            coordinator_messages: 0,
         }
+    }
+
+    /// Attaches P2P stealing metrics gathered by the distributed worker loops.
+    ///
+    /// Call this on a `SchedulerMetrics` produced by the P2P coordinator loop to
+    /// fill in the four P2P-specific fields; they default to zero for all other
+    /// scheduler variants.
+    pub fn with_p2p(
+        mut self,
+        p2p_steals_attempted: u64,
+        p2p_steals_successful: u64,
+        p2p_steal_latency_ms: f64,
+        coordinator_messages: u64,
+    ) -> Self {
+        self.p2p_steals_attempted = p2p_steals_attempted;
+        self.p2p_steals_successful = p2p_steals_successful;
+        self.p2p_steal_latency_ms = p2p_steal_latency_ms;
+        self.coordinator_messages = coordinator_messages;
+        self
     }
 }
 
@@ -202,7 +237,15 @@ impl fmt::Display for RunMetrics {
         writeln!(f, "gpu_ops           : {}", m.gpu_ops)?;
         writeln!(f, "cpu_ops           : {}", m.cpu_ops)?;
         writeln!(f, "gpu_batches       : {}", m.gpu_batches)?;
-        write!(f, "avg_batch_size    : {:.1}", m.gpu_batch_size_avg)
+        write!(f, "avg_batch_size    : {:.1}", m.gpu_batch_size_avg)?;
+        if m.p2p_steals_attempted > 0 {
+            writeln!(f)?;
+            writeln!(f, "p2p_steals_att    : {}", m.p2p_steals_attempted)?;
+            writeln!(f, "p2p_steals_ok     : {}", m.p2p_steals_successful)?;
+            writeln!(f, "p2p_steal_lat_ms  : {:.3}", m.p2p_steal_latency_ms)?;
+            write!(f, "coord_messages    : {}", m.coordinator_messages)?;
+        }
+        Ok(())
     }
 }
 
@@ -278,5 +321,25 @@ mod tests {
         assert!(s.contains("cpu_ops"));
         assert!(s.contains("gpu_batches"));
         assert!(s.contains("avg_batch_size"));
+    }
+
+    #[test]
+    fn with_p2p_sets_fields() {
+        let m = sample_metrics().with_p2p(100, 73, 2.5, 48);
+        assert_eq!(m.p2p_steals_attempted, 100);
+        assert_eq!(m.p2p_steals_successful, 73);
+        assert!((m.p2p_steal_latency_ms - 2.5).abs() < 1e-9);
+        assert_eq!(m.coordinator_messages, 48);
+        // Core derived fields must survive the builder call.
+        assert!((m.throughput_ops_per_sec - 400.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn display_shows_p2p_fields_when_nonzero() {
+        let mut r = sample_run();
+        r.metrics = r.metrics.with_p2p(142, 104, 1.8, 48);
+        let s = format!("{r}");
+        assert!(s.contains("p2p_steals_att"));
+        assert!(s.contains("coord_messages"));
     }
 }

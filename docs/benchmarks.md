@@ -316,3 +316,50 @@ _Full multi-node scaling results (4 / 8 / 16 / 32 nodes) pending Narval runs._
   matmul: 128
 [run] work-stealing/matmul-parallel(16x8,m=2048) (8w): 2458.6 ms  52 ops/s  idle=45.6%  steals=11.0/s  threshold=4  gpu_ops=128  cpu_ops=0  gpu_batches=8  avg_batch=12.6
 [nibi-gpu] finished: 2026-04-29T12:00:22-04:00
+
+## 05-06-2026
+
+[scaling]   median: tp=7382  idle=0.0%  steal=0.0/s  eff=1.000
+[scaling]   median: tp=14440  idle=0.0%  steal=0.0/s  eff=0.978
+[scaling]   median: tp=27465  idle=0.0%  steal=0.0/s  eff=0.930
+[scaling]   median: tp=7428  idle=0.6%  steal=34.8/s  eff=1.000
+[scaling]   median: tp=14598  idle=2.2%  steal=45.6/s  eff=0.983
+[scaling]   median: tp=27497  idle=6.2%  steal=0.0/s  eff=0.925
+[scaling]   median: tp=1861  idle=0.1%  steal=130/s  eff=1.000
+[scaling]   median: tp=3592  idle=1.0%  steal=181/s  eff=0.965
+[scaling]   median: tp=6321  idle=3.9%  steal=254/s  eff=0.849
+[scaling]   median: tp=585  idle=78.4%  steal=0.0/s  eff=1.000
+[scaling]   median: tp=586  idle=84.3%  steal=0.0/s  eff=0.501
+[scaling]   median: tp=583  idle=86.6%  steal=0.0/s  eff=0.249
+[scaling]   median: tp=587  idle=79.4%  steal=0.0/s  eff=1.000
+[scaling]   median: tp=591  idle=88.0%  steal=4.6/s  eff=0.503
+[scaling]   median: tp=580  idle=92.1%  steal=0.0/s  eff=0.247
+
+---
+
+### P2P vs Coordinator Scaling Study (job 60529184, 2026-05-06)
+
+- **Machine:** Narval (Alliance Canada)
+- **Nodes:** 2, 4, 8 | **CPUs/rank:** 32
+- **Schedulers:** static | WS-coordinator | WS-P2P
+- **Note:** xlarge-transformer P2P deadlocked (fix in progress).
+  Imbalanced DAG not reached. Results below are xlarge-wide only.
+
+### Strong Scaling — XLarge Wide DAG
+
+| Nodes | Static | WS-coord | WS-P2P | P2P Eff | P2P Steal/s |
+|---|---|---|---|---|---|
+| 2 | 7,382 | 7,428 | 1,861 | 1.000 | 130/s |
+| 4 | 14,440 | 14,598 | 3,592 | 0.965 | 181/s |
+| 8 | 27,465 | 27,497 | 6,321 | 0.849 | 254/s |
+
+**Analysis:** P2P stealing shows 4-5x lower throughput than
+coordinator-mediated WS on the balanced xlarge-wide DAG.
+High steal rate (130-254/s) indicates workers are stealing
+continuously even when not needed — P2P protocol overhead
+dominates on balanced workloads where stealing rarely recovers
+useful work. In contrast, mpirun validation on the imbalanced
+DAG showed P2P achieving 2x higher throughput than coordinator
+(403 vs 202 ops/s), confirming P2P stealing is effective when
+workload imbalance is genuine. Next step: adaptive strategy
+selection — use P2P on imbalanced DAGs, coordinator on balanced.

@@ -172,6 +172,16 @@ enum Command {
         /// Disable adaptive steal threshold; use the fixed --steal-threshold value instead.
         #[arg(long)]
         no_adaptive_threshold: bool,
+        /// Enable peer-to-peer work stealing (requires --features distributed and ≥2 MPI ranks).
+        /// Workers steal directly from peers; coordinator only tracks dependency resolution.
+        #[arg(long, overrides_with = "no_p2p_stealing")]
+        p2p_stealing: bool,
+        /// Use coordinator-mediated stealing (disables P2P; old behaviour).
+        #[arg(long, overrides_with = "p2p_stealing")]
+        no_p2p_stealing: bool,
+        /// Print per-steal timing to stderr (P2P mode only; useful for diagnosing latency).
+        #[arg(long)]
+        p2p_debug: bool,
         /// Device policy: "cpu" (default), "cuda"/"cuda:N" (requires cuda feature),
         /// or "auto" (routes matmul≥threshold and conv2d to GPU, elementwise to CPU).
         #[arg(long, default_value = "cpu")]
@@ -277,6 +287,9 @@ enum MpiSchedulerKind {
     Static,
     #[value(name = "work-stealing")]
     WorkStealing,
+    /// Peer-to-peer work stealing; workers steal directly from each other.
+    #[value(name = "work-stealing-p2p")]
+    WorkStealingP2p,
 }
 
 /// Groups all synthetic DAG topology parameters to avoid long argument lists.
@@ -613,10 +626,12 @@ fn run_mpi_bench(
     let mode = match scheduler {
         MpiSchedulerKind::Static => MpiSchedulerMode::Static,
         MpiSchedulerKind::WorkStealing => MpiSchedulerMode::WorkStealing,
+        MpiSchedulerKind::WorkStealingP2p => MpiSchedulerMode::P2PWorkStealing,
     };
     let sched_name = match mode {
         MpiSchedulerMode::Static => "mpi-static",
         MpiSchedulerMode::WorkStealing => "mpi-work-stealing",
+        MpiSchedulerMode::P2PWorkStealing => "mpi-work-stealing-p2p",
     };
     let (arc_dag, sources, skew) = match dag {
         MpiDagKind::Uniform => {
@@ -634,17 +649,37 @@ fn run_mpi_bench(
         Some((_, metrics)) => {
             // Only rank 0 reaches here.
             let run = make_run_metrics(sched_name, skew, nodes, 1, dag_size, metrics);
-            println!(
-                "[mpi-bench] {sched_name}/{}: elapsed={:.1} ms  throughput={:.0} ops/s  \
-                 idle={:.1}%  steal_attempts={}  successful_steals={}  steal_rate={:.1}/s",
-                if skew { "skewed" } else { "uniform" },
-                run.metrics.elapsed_ms,
-                run.metrics.throughput_ops_per_sec,
-                idle_pct(&run),
-                run.metrics.steal_attempts,
-                run.metrics.successful_steals,
-                run.metrics.steal_rate,
-            );
+            if run.metrics.p2p_steals_attempted > 0 {
+                println!(
+                    "[mpi] ranks={} p2p_steals={} success_rate={:.2} coord_msgs={} \
+                     lat_ms={:.2}  elapsed={:.1} ms  throughput={:.0} ops/s  idle={:.1}%",
+                    run.nodes,
+                    run.metrics.p2p_steals_attempted,
+                    if run.metrics.p2p_steals_attempted > 0 {
+                        run.metrics.p2p_steals_successful as f64
+                            / run.metrics.p2p_steals_attempted as f64
+                    } else {
+                        0.0
+                    },
+                    run.metrics.coordinator_messages,
+                    run.metrics.p2p_steal_latency_ms,
+                    run.metrics.elapsed_ms,
+                    run.metrics.throughput_ops_per_sec,
+                    idle_pct(&run),
+                );
+            } else {
+                println!(
+                    "[mpi-bench] {sched_name}/{}: elapsed={:.1} ms  throughput={:.0} ops/s  \
+                     idle={:.1}%  steal_attempts={}  successful_steals={}  steal_rate={:.1}/s",
+                    if skew { "skewed" } else { "uniform" },
+                    run.metrics.elapsed_ms,
+                    run.metrics.throughput_ops_per_sec,
+                    idle_pct(&run),
+                    run.metrics.steal_attempts,
+                    run.metrics.successful_steals,
+                    run.metrics.steal_rate,
+                );
+            }
             if let Some(path) = output {
                 append_json(&path, &[run])
                     .with_context(|| format!("writing {}", path.display()))?;
@@ -696,6 +731,8 @@ async fn run_model(
     steal_threshold: usize,
     adaptive_threshold: bool,
     policy: DevicePolicy,
+    p2p_stealing: bool,
+    p2p_debug: bool,
     p: &SyntheticDagParams,
 ) -> Result<()> {
     let (arc_dag, sources, is_skew, label) = match (model, dag) {
@@ -763,6 +800,51 @@ async fn run_model(
         DevicePolicy::Auto { .. } => Device::Cpu,
     };
 
+    // ── P2P MPI path (distributed feature + --p2p-stealing) ─────────────────
+    #[cfg(feature = "distributed")]
+    if p2p_stealing && matches!(scheduler, OnnxScheduler::WorkStealing) {
+        use ferroflow_runtime::{MpiSchedulerMode, MpiWorker};
+        match MpiWorker::new(Arc::clone(&arc_dag), sources.clone())
+            .with_mode(MpiSchedulerMode::P2PWorkStealing)
+            .with_p2p_debug(p2p_debug)
+            .run()
+            .context("MPI P2P worker failed")?
+        {
+            Some((_, m)) => {
+                let run = RunMetrics {
+                    scheduler: "work-stealing-p2p".to_string(),
+                    nodes: 1,
+                    workers_per_node: workers as u32,
+                    dag_size: dag_size as u32,
+                    skew: is_skew,
+                    metrics: m,
+                };
+                println!(
+                    "[run] work-stealing-p2p/{label} ({workers}w): {:.1} ms  {:.0} ops/s  \
+                     idle={:.1}%  p2p_steals={}  success_rate={:.2}  coord_msgs={}",
+                    run.metrics.elapsed_ms,
+                    run.metrics.throughput_ops_per_sec,
+                    idle_pct(&run),
+                    run.metrics.p2p_steals_attempted,
+                    if run.metrics.p2p_steals_attempted > 0 {
+                        run.metrics.p2p_steals_successful as f64
+                            / run.metrics.p2p_steals_attempted as f64
+                    } else {
+                        0.0
+                    },
+                    run.metrics.coordinator_messages,
+                );
+                return Ok(());
+            }
+            None => return Ok(()), // worker ranks exit here
+        }
+    }
+
+    // Suppress unused-variable warnings when distributed feature is disabled.
+    #[cfg(not(feature = "distributed"))]
+    let _ = (p2p_stealing, p2p_debug);
+
+    // ── local scheduler path ──────────────────────────────────────────────────
     let (sched_name, m) = match scheduler {
         OnnxScheduler::Sequential => {
             let (_, m) = SequentialExecutor::execute(&arc_dag, sources)
@@ -896,6 +978,9 @@ async fn main() -> Result<()> {
             scheduler,
             steal_threshold,
             no_adaptive_threshold,
+            p2p_stealing,
+            no_p2p_stealing,
+            p2p_debug,
             device: device_str,
             gpu_matmul_threshold,
             seq_len,
@@ -918,6 +1003,8 @@ async fn main() -> Result<()> {
             let policy = DevicePolicy::from_str(&device_str)
                 .with_context(|| format!("invalid --device value: {device_str:?}"))?
                 .with_matmul_threshold(gpu_matmul_threshold);
+            // --p2p-stealing wins if both flags somehow appear; --no-p2p-stealing disables.
+            let use_p2p = p2p_stealing && !no_p2p_stealing;
             let p = SyntheticDagParams {
                 seq_len,
                 d_model,
@@ -944,6 +1031,8 @@ async fn main() -> Result<()> {
                 steal_threshold,
                 !no_adaptive_threshold,
                 policy,
+                use_p2p,
+                p2p_debug,
                 &p,
             )
             .await?;
