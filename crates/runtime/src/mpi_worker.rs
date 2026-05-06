@@ -109,7 +109,7 @@ impl MpiWorker {
             source_tensors,
             mode: MpiSchedulerMode::WorkStealing,
             p2p_debug: false,
-            p2p_idle_threshold_ms: 5,
+            p2p_idle_threshold_ms: 1000,
         }
     }
 
@@ -120,7 +120,7 @@ impl MpiWorker {
     /// and blocks until the coordinator pushes a ready op directly.  This prevents
     /// livelock on serial DAGs where no peer ever holds a stealable op.
     ///
-    /// Default: 5 ms.  Corresponds to `--p2p-idle-threshold` on the CLI.
+    /// Default: 1000 ms.  Corresponds to `--p2p-idle-threshold` on the CLI.
     pub fn with_p2p_idle_threshold(mut self, ms: u64) -> Self {
         self.p2p_idle_threshold_ms = ms;
         self
@@ -592,7 +592,7 @@ fn p2p_worker_loop<C: Communicator>(
     // Workers must not steal from peers before receiving initial work.  Without
     // this guard every worker immediately tries to steal from every other worker,
     // all fail (queues are universally empty), and the 100 ms steal timeout plus
-    // the 5 ms idle threshold fire before the coordinator's first dispatch even
+    // the 1000 ms idle threshold fire before the coordinator's first dispatch even
     // lands — producing the "steal failed" lines at t≈2 ms seen in --p2p-debug.
     'startup: loop {
         let (msg, _) = mpi_recv_any(world)?;
@@ -656,6 +656,57 @@ fn p2p_worker_loop<C: Communicator>(
         // ── queue empty — track idle ──────────────────────────────────────────
         if idle_start.is_none() {
             idle_start = Some(Instant::now());
+        }
+
+        // ── eager coordinator probe ───────────────────────────────────────────
+        // On serial/deep DAGs the coordinator resolves dependencies faster than
+        // peers can yield work.  Checking rank 0 on every idle iteration catches
+        // a pending P2POpAssignment before we spend a steal RTT + backoff only
+        // to spin until the idle threshold fires.
+        if let Some(status) = world.process_at_rank(0).immediate_probe() {
+            let src = status.source_rank();
+            let (bytes, _) = world.process_at_rank(src).receive_vec::<u8>();
+            let coord_msg: MpiMsg =
+                bincode::deserialize(&bytes).context("MpiMsg deserialize")?;
+            match coord_msg {
+                MpiMsg::P2POpAssignment { op_id, op, inputs } => {
+                    if p2p_debug {
+                        eprintln!(
+                            "[p2p-debug] rank={rank} coordinator probe found op={op_id}"
+                        );
+                    }
+                    if let Some(start) = idle_start.take() {
+                        idle_time_ms += start.elapsed().as_secs_f64() * 1000.0;
+                    }
+                    local_queue.push_back((op_id, op, inputs));
+                    pending_steal = None;
+                    next_steal_at = None;
+                    backoff = Duration::from_millis(P2P_INITIAL_BACKOFF_MS);
+                    continue;
+                }
+                MpiMsg::Shutdown => {
+                    if let Some(start) = idle_start.take() {
+                        idle_time_ms += start.elapsed().as_secs_f64() * 1000.0;
+                    }
+                    let avg_latency = if steal_latency_count > 0 {
+                        steal_latency_sum_ms / steal_latency_count as f64
+                    } else {
+                        0.0
+                    };
+                    mpi_send(
+                        world,
+                        0,
+                        &MpiMsg::P2PMetrics {
+                            idle_time_ms,
+                            p2p_steals_attempted,
+                            p2p_steals_successful,
+                            p2p_steal_latency_ms: avg_latency,
+                        },
+                    )?;
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
 
         // Check idle threshold on every iteration, not only in the poll-timeout
