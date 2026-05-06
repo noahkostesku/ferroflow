@@ -3,8 +3,8 @@
     "dag": "xlarge-wide",
     "nodes": 2,
     "scheduler": "static",
-    "throughput": 7382.0,
-    "stddev": 2.24,
+    "throughput": 7268.0,
+    "stddev": 92.52,
     "idle_pct": 0.0,
     "steal_rate": 0.0,
     "efficiency": 1.0
@@ -13,18 +13,18 @@
     "dag": "xlarge-wide",
     "nodes": 4,
     "scheduler": "static",
-    "throughput": 14440.0,
-    "stddev": 9.88,
+    "throughput": 13982.0,
+    "stddev": 214.71,
     "idle_pct": 0.0,
     "steal_rate": 0.0,
-    "efficiency": 0.978
+    "efficiency": 0.962
   },
   {
     "dag": "xlarge-wide",
     "nodes": 8,
     "scheduler": "static",
-    "throughput": 27465.0,
-    "stddev": 59.85,
+    "throughput": 27023.0,
+    "stddev": 674.02,
     "idle_pct": 0.0,
     "steal_rate": 0.0,
     "efficiency": 0.93
@@ -33,69 +33,69 @@
     "dag": "xlarge-wide",
     "nodes": 2,
     "scheduler": "work-stealing",
-    "throughput": 7428.0,
-    "stddev": 2.68,
-    "idle_pct": 0.6,
-    "steal_rate": 34.8,
+    "throughput": 7309.0,
+    "stddev": 26.54,
+    "idle_pct": 0.5,
+    "steal_rate": 34.4,
     "efficiency": 1.0
   },
   {
     "dag": "xlarge-wide",
     "nodes": 4,
     "scheduler": "work-stealing",
-    "throughput": 14598.0,
-    "stddev": 8.98,
-    "idle_pct": 2.2,
-    "steal_rate": 45.6,
-    "efficiency": 0.983
+    "throughput": 14212.0,
+    "stddev": 160.74,
+    "idle_pct": 2.5,
+    "steal_rate": 33.3,
+    "efficiency": 0.972
   },
   {
     "dag": "xlarge-wide",
     "nodes": 8,
     "scheduler": "work-stealing",
-    "throughput": 27497.0,
-    "stddev": 41.83,
-    "idle_pct": 6.2,
+    "throughput": 26688.0,
+    "stddev": 434.23,
+    "idle_pct": 5.6,
     "steal_rate": 0.0,
-    "efficiency": 0.925
+    "efficiency": 0.913
   },
   {
     "dag": "xlarge-wide",
     "nodes": 2,
     "scheduler": "work-stealing-p2p",
-    "throughput": 1861.0,
-    "stddev": 1.87,
-    "idle_pct": 0.1,
-    "steal_rate": 130.0,
+    "throughput": 1319.0,
+    "stddev": 9.33,
+    "idle_pct": 0.0,
+    "steal_rate": 0.0,
     "efficiency": 1.0
   },
   {
     "dag": "xlarge-wide",
     "nodes": 4,
     "scheduler": "work-stealing-p2p",
-    "throughput": 3592.0,
-    "stddev": 12.28,
-    "idle_pct": 1.0,
-    "steal_rate": 181.0,
-    "efficiency": 0.965
+    "throughput": 2695.0,
+    "stddev": 15.35,
+    "idle_pct": 0.8,
+    "steal_rate": 9.0,
+    "efficiency": 1.022
   },
   {
     "dag": "xlarge-wide",
     "nodes": 8,
     "scheduler": "work-stealing-p2p",
-    "throughput": 6321.0,
-    "stddev": 48.08,
-    "idle_pct": 3.9,
-    "steal_rate": 254.0,
-    "efficiency": 0.849
+    "throughput": 5831.0,
+    "stddev": 1190.86,
+    "idle_pct": 5.0,
+    "steal_rate": 32.0,
+    "efficiency": 1.105
   },
   {
     "dag": "xlarge-transformer",
     "nodes": 2,
     "scheduler": "static",
-    "throughput": 585.0,
-    "stddev": 1.95,
-    "idle_pct": 78.4,
+    "throughput": 554.0,
+    "stddev": 44.97,
+    "idle_pct": 78.5,
     "steal_rate": 0.0,
     "efficiency": 1.0
   },
@@ -103,29 +103,29 @@
     "dag": "xlarge-transformer",
     "nodes": 4,
     "scheduler": "static",
-    "throughput": 586.0,
-    "stddev": 2.83,
-    "idle_pct": 84.3,
+    "throughput": 542.0,
+    "stddev": 7.63,
+    "idle_pct": 83.4,
     "steal_rate": 0.0,
-    "efficiency": 0.501
+    "efficiency": 0.489
   },
   {
     "dag": "xlarge-transformer",
     "nodes": 8,
     "scheduler": "static",
-    "throughput": 583.0,
-    "stddev": 3.32,
-    "idle_pct": 86.6,
+    "throughput": 523.0,
+    "stddev": 14.34,
+    "idle_pct": 85.6,
     "steal_rate": 0.0,
-    "efficiency": 0.249
+    "efficiency": 0.236
   },
   {
     "dag": "xlarge-transformer",
     "nodes": 2,
     "scheduler": "work-stealing",
-    "throughput": 587.0,
-    "stddev": 2.68,
-    "idle_pct": 79.4,
+    "throughput": 546.0,
+    "stddev": 37.85,
+    "idle_pct": 78.9,
     "steal_rate": 0.0,
     "efficiency": 1.0
   },
@@ -133,20 +133,20 @@
     "dag": "xlarge-transformer",
     "nodes": 4,
     "scheduler": "work-stealing",
-    "throughput": 591.0,
-    "stddev": 3.05,
-    "idle_pct": 88.0,
-    "steal_rate": 4.6,
-    "efficiency": 0.503
+    "throughput": 560.0,
+    "stddev": 13.16,
+    "idle_pct": 87.2,
+    "steal_rate": 4.4,
+    "efficiency": 0.513
   },
   {
     "dag": "xlarge-transformer",
     "nodes": 8,
     "scheduler": "work-stealing",
-    "throughput": 580.0,
-    "stddev": 1.67,
-    "idle_pct": 92.1,
+    "throughput": 538.0,
+    "stddev": 4.49,
+    "idle_pct": 91.2,
     "steal_rate": 0.0,
-    "efficiency": 0.247
+    "efficiency": 0.246
   }
 ]

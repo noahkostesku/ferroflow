@@ -12,6 +12,12 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_STEAL_THRESHOLD: usize = 2;
 const RECENT_VICTIM_WINDOW: usize = 3;
 const P2P_MAX_BACKOFF_MS: u64 = 50;
+const P2P_INITIAL_BACKOFF_MS: u64 = 1;
+/// Maximum ops dispatched per worker before coordinator waits for results.
+///
+/// Prevents the coordinator from flooding all initially-ready ops to workers in
+/// one synchronous burst (which serialises on MPI rendezvous for large tensors).
+const MAX_WORKER_INFLIGHT: usize = 4;
 
 // ── scheduler mode ────────────────────────────────────────────────────────────
 
@@ -19,8 +25,8 @@ const P2P_MAX_BACKOFF_MS: u64 = 50;
 ///
 /// - `Static`: ops pre-assigned by `(op_id − 1) % n_workers`.
 /// - `WorkStealing`: demand-driven; idle workers pull from coordinator's global ready queue.
-/// - `P2PWorkStealing`: push-assign from coordinator; idle workers steal directly from peers
-///   via three-way MPI handshake, bypassing the coordinator hot path.
+/// - `P2PWorkStealing`: push-assign from coordinator (capped window); idle workers steal
+///   directly from peers via two-way MPI handshake, bypassing the coordinator hot path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MpiSchedulerMode {
     Static,
@@ -53,23 +59,18 @@ enum MpiMsg {
     // ── P2P work-stealing ─────────────────────────────────────────────────────
     /// Coordinator pushes a newly-ready op directly to a worker (P2P mode only).
     P2POpAssignment { op_id: OpId, op: Op, inputs: Vec<Tensor> },
-    /// Step 1 of the three-way handshake: thief asks victim for an op.
+    /// Step 1 of the two-way handshake: thief asks victim for an op.
     P2PStealRequest { from_rank: i32, request_id: u64 },
     /// Step 2: victim replies with an op (or `None` if its queue is too short).
     ///
-    /// The victim has moved the op into a `reserved_op` slot; it will not
-    /// execute or re-donate it until the `P2PStealAck` arrives.
+    /// Two-way protocol: victim pops the op before sending the response so no
+    /// Ack round-trip is required.  The op belongs to the thief on receipt.
     P2PStealResponse {
         request_id: u64,
         op_id: Option<OpId>,
         op: Option<Op>,
         inputs: Option<Vec<Tensor>>,
     },
-    /// Step 3: thief confirms receipt; victim finalises the transfer.
-    ///
-    /// `accepted = true`  → victim drops the reserved op (thief will execute it).
-    /// `accepted = false` → victim puts the reserved op back in its local queue.
-    P2PStealAck { request_id: u64, accepted: bool },
     /// Worker sends P2P-specific counters to coordinator at shutdown.
     P2PMetrics {
         idle_time_ms: f64,
@@ -90,21 +91,32 @@ pub struct MpiWorker {
     dag: Arc<Dag>,
     source_tensors: HashMap<OpId, Tensor>,
     mode: MpiSchedulerMode,
+    p2p_debug: bool,
 }
 
 impl MpiWorker {
-    /// Creates a new `MpiWorker` with P2P work-stealing dispatch (default).
+    /// Creates a new `MpiWorker` defaulting to coordinator-mediated work-stealing.
     pub fn new(dag: Arc<Dag>, source_tensors: HashMap<OpId, Tensor>) -> Self {
         Self {
             dag,
             source_tensors,
             mode: MpiSchedulerMode::WorkStealing,
+            p2p_debug: false,
         }
     }
 
     /// Overrides the dispatch strategy.
     pub fn with_mode(mut self, mode: MpiSchedulerMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    /// Enables per-steal timing output on stderr (P2P mode only).
+    ///
+    /// Each successful or failed steal prints one line:
+    /// `[p2p-debug] rank=N stole from=M latency=X.XXms`
+    pub fn with_p2p_debug(mut self, debug: bool) -> Self {
+        self.p2p_debug = debug;
         self
     }
 
@@ -146,7 +158,7 @@ impl MpiWorker {
                     worker_loop(&world, rank, self.mode).context("worker loop failed")?;
                 }
                 MpiSchedulerMode::P2PWorkStealing => {
-                    p2p_worker_loop(&world, rank, n_ranks)
+                    p2p_worker_loop(&world, rank, n_ranks, self.p2p_debug)
                         .context("P2P worker loop failed")?;
                 }
             }
@@ -242,9 +254,10 @@ impl PeerDirectory {
 
 /// Push-based coordinator for P2P work-stealing.
 ///
-/// Assigns newly-ready ops directly to workers in round-robin order so that
-/// workers start with roughly balanced queues.  Coordinator only tracks
-/// dependency resolution and op completions — it never mediates steal requests.
+/// Dispatches ops to workers in round-robin order with a per-worker-inflight
+/// window of `MAX_WORKER_INFLIGHT`.  The cap prevents flooding all initially-
+/// ready ops at once, which would serialise on MPI rendezvous for large tensors.
+/// Coordinator only tracks dependency resolution — it never mediates P2P steals.
 fn p2p_coordinator_loop<C: Communicator>(
     world: &C,
     dag: Arc<Dag>,
@@ -252,12 +265,14 @@ fn p2p_coordinator_loop<C: Communicator>(
     n_ranks: usize,
 ) -> anyhow::Result<(HashMap<OpId, Tensor>, SchedulerMetrics)> {
     let n_workers = n_ranks - 1;
+    let dispatch_cap = n_workers * MAX_WORKER_INFLIGHT;
     let mut tensor_store = source_tensors;
     let mut completed: HashSet<OpId> = HashSet::new();
     let mut dispatched: HashSet<OpId> = HashSet::new();
     let mut ready_queue: VecDeque<OpId> = VecDeque::new();
     let mut coordinator_messages = 0u64;
     let mut worker_cursor = 0usize;
+    let mut total_inflight = 0usize;
 
     for op in &dag.ops {
         if op.input_ids.is_empty() {
@@ -267,25 +282,29 @@ fn p2p_coordinator_loop<C: Communicator>(
 
     let total_compute = dag.ops.iter().filter(|op| !op.input_ids.is_empty()).count();
     let mut completed_compute = 0usize;
-    let mut in_flight = 0usize;
 
-    // Push all initially ready ops before entering the receive loop.
     enqueue_ready(&dag, &completed, &dispatched, &mut ready_queue);
-    while let Some(op_id) = ready_queue.pop_front() {
-        let target_rank = (worker_cursor % n_workers) as i32 + 1;
-        worker_cursor += 1;
-        let op = dag
-            .get_op(op_id)
-            .ok_or_else(|| anyhow::anyhow!("op {op_id} missing from DAG"))?
-            .clone();
-        let inputs = op.input_ids.iter().map(|&dep| tensor_store[&dep].clone()).collect();
-        mpi_send(world, target_rank, &MpiMsg::P2POpAssignment { op_id, op, inputs })?;
-        dispatched.insert(op_id);
-        in_flight += 1;
-        coordinator_messages += 1;
-    }
 
     let t0 = Instant::now();
+
+    // Initial dispatch: fill workers up to `dispatch_cap` total in-flight.
+    while total_inflight < dispatch_cap {
+        if let Some(op_id) = ready_queue.pop_front() {
+            let target_rank = (worker_cursor % n_workers) as i32 + 1;
+            worker_cursor += 1;
+            let op = dag
+                .get_op(op_id)
+                .ok_or_else(|| anyhow::anyhow!("op {op_id} missing from DAG"))?
+                .clone();
+            let inputs = op.input_ids.iter().map(|&dep| tensor_store[&dep].clone()).collect();
+            mpi_send(world, target_rank, &MpiMsg::P2POpAssignment { op_id, op, inputs })?;
+            dispatched.insert(op_id);
+            total_inflight += 1;
+            coordinator_messages += 1;
+        } else {
+            break;
+        }
+    }
 
     loop {
         let (msg, _src) = mpi_recv_any(world)?;
@@ -294,30 +313,36 @@ fn p2p_coordinator_loop<C: Communicator>(
         if let MpiMsg::OpResult { op_id, tensor } = msg {
             tensor_store.insert(op_id, tensor);
             completed.insert(op_id);
-            in_flight -= 1;
+            if total_inflight > 0 {
+                total_inflight -= 1;
+            }
             completed_compute += 1;
 
             enqueue_ready(&dag, &completed, &dispatched, &mut ready_queue);
-            while let Some(new_op_id) = ready_queue.pop_front() {
-                let target_rank = (worker_cursor % n_workers) as i32 + 1;
-                worker_cursor += 1;
-                let op = dag
-                    .get_op(new_op_id)
-                    .ok_or_else(|| anyhow::anyhow!("op {new_op_id} missing from DAG"))?
-                    .clone();
-                let inputs =
-                    op.input_ids.iter().map(|&dep| tensor_store[&dep].clone()).collect();
-                mpi_send(world, target_rank, &MpiMsg::P2POpAssignment {
-                    op_id: new_op_id,
-                    op,
-                    inputs,
-                })?;
-                dispatched.insert(new_op_id);
-                in_flight += 1;
-                coordinator_messages += 1;
+            while total_inflight < dispatch_cap {
+                if let Some(new_op_id) = ready_queue.pop_front() {
+                    let target_rank = (worker_cursor % n_workers) as i32 + 1;
+                    worker_cursor += 1;
+                    let op = dag
+                        .get_op(new_op_id)
+                        .ok_or_else(|| anyhow::anyhow!("op {new_op_id} missing from DAG"))?
+                        .clone();
+                    let inputs =
+                        op.input_ids.iter().map(|&dep| tensor_store[&dep].clone()).collect();
+                    mpi_send(world, target_rank, &MpiMsg::P2POpAssignment {
+                        op_id: new_op_id,
+                        op,
+                        inputs,
+                    })?;
+                    dispatched.insert(new_op_id);
+                    total_inflight += 1;
+                    coordinator_messages += 1;
+                } else {
+                    break;
+                }
             }
 
-            if completed_compute >= total_compute && in_flight == 0 {
+            if completed_compute >= total_compute && total_inflight == 0 {
                 break;
             }
         }
@@ -385,99 +410,102 @@ fn p2p_coordinator_loop<C: Communicator>(
 
 // ── P2P worker (ranks 1..N) ───────────────────────────────────────────────────
 
-/// A pending P2P steal this worker initiated (thief role).
+/// Pending steal this worker initiated (thief role), awaiting the victim's response.
 struct PendingSteal {
     request_id: u64,
     victim_rank: i32,
     sent_at: Instant,
 }
 
-/// An op reserved for a peer thief while awaiting the steal Ack (victim role).
-struct ReservedOp {
-    request_id: u64,
-    thief_rank: i32,
-    op_id: OpId,
-    op: Op,
-    inputs: Vec<Tensor>,
-}
-
 /// P2P worker loop — handles coordinator assignments, serves steal requests from
 /// peers, and steals from peers when its own queue is empty.
 ///
-/// The loop uses `mpi_recv_any` so that while waiting for a steal response the
-/// worker can immediately service incoming steal requests from other peers,
-/// achieving the non-blocking interleaving required by the P2P design.
+/// **Two-way handshake**: victim pops the op and sends it in one message.
+/// No Ack round-trip is needed, halving steal latency vs the original three-way design.
 ///
-/// Three-way handshake prevents double-execution:
-///   Request → Response (victim reserves op) → Ack (victim commits or reverts).
+/// **Timestamp backoff**: failed steals set `next_steal_at` instead of sleeping,
+/// so the worker remains in `mpi_recv_any` and processes incoming assignments
+/// immediately during the backoff window.
 fn p2p_worker_loop<C: Communicator>(
     world: &C,
     rank: i32,
     n_ranks: usize,
+    p2p_debug: bool,
 ) -> anyhow::Result<()> {
     let mut local_queue: VecDeque<(OpId, Op, Vec<Tensor>)> = VecDeque::new();
     let mut peer_dir = PeerDirectory::new(rank, n_ranks);
     let steal_threshold = DEFAULT_STEAL_THRESHOLD;
 
-    // Victim role: op reserved for a thief, awaiting their Ack.
-    let mut reserved_op: Option<ReservedOp> = None;
-    // Thief role: steal we initiated, awaiting victim's Response.
     let mut pending_steal: Option<PendingSteal> = None;
+    let mut next_steal_at: Option<Instant> = None;
+    let mut backoff = Duration::from_millis(P2P_INITIAL_BACKOFF_MS);
 
     let mut idle_time_ms = 0.0f64;
+    let mut idle_start: Option<Instant> = None;
     let mut p2p_steals_attempted = 0u64;
     let mut p2p_steals_successful = 0u64;
     let mut steal_latency_sum_ms = 0.0f64;
     let mut steal_latency_count = 0u64;
-    let mut next_request_id: u64 = (rank as u64) << 32; // rank-scoped IDs, no collisions
-    let mut backoff = Duration::from_millis(10);
+    let mut next_request_id: u64 = (rank as u64) << 32; // rank-scoped IDs; no collisions
 
     loop {
         // ── execute local work ────────────────────────────────────────────────
         if let Some((op_id, op, inputs)) = local_queue.pop_front() {
+            if let Some(start) = idle_start.take() {
+                idle_time_ms += start.elapsed().as_secs_f64() * 1000.0;
+            }
             let input_refs: Vec<&Tensor> = inputs.iter().collect();
             let tensor = execute_op(&op, &input_refs, &Device::Cpu)
                 .map_err(|e| anyhow::anyhow!("rank {rank}: op {op_id} failed: {e}"))?;
             mpi_send(world, 0, &MpiMsg::OpResult { op_id, tensor })?;
-            backoff = Duration::from_millis(10);
+            backoff = Duration::from_millis(P2P_INITIAL_BACKOFF_MS);
             continue;
         }
 
-        // ── queue empty: initiate steal if none in flight ─────────────────────
-        if pending_steal.is_none() && !peer_dir.ranks.is_empty() {
-            let victim = peer_dir.choose_victim();
-            let req_id = next_request_id;
-            next_request_id += 1;
-            mpi_send(
-                world,
-                victim,
-                &MpiMsg::P2PStealRequest { from_rank: rank, request_id: req_id },
-            )?;
-            p2p_steals_attempted += 1;
-            pending_steal = Some(PendingSteal {
-                request_id: req_id,
-                victim_rank: victim,
-                sent_at: Instant::now(),
-            });
+        // ── queue empty — track idle ──────────────────────────────────────────
+        if idle_start.is_none() {
+            idle_start = Some(Instant::now());
         }
 
-        // ── wait for next message from any source ─────────────────────────────
-        // Using any_process() means a steal request from another worker will be
-        // received here even while we are waiting for our own steal response,
-        // achieving non-blocking interleaving without true MPI_Irecv complexity.
+        // ── initiate steal if no pending steal and backoff has expired ────────
+        if pending_steal.is_none() && !peer_dir.ranks.is_empty() {
+            let now = Instant::now();
+            if next_steal_at.map_or(true, |t| now >= t) {
+                let victim = peer_dir.choose_victim();
+                let req_id = next_request_id;
+                next_request_id += 1;
+                mpi_send(
+                    world,
+                    victim,
+                    &MpiMsg::P2PStealRequest { from_rank: rank, request_id: req_id },
+                )?;
+                p2p_steals_attempted += 1;
+                pending_steal = Some(PendingSteal {
+                    request_id: req_id,
+                    victim_rank: victim,
+                    sent_at: now,
+                });
+                next_steal_at = None;
+            }
+        }
+
+        // ── block on next message from any source ─────────────────────────────
+        // `any_process().receive_vec` means incoming coordinator assignments are
+        // processed immediately even while we are waiting for a steal response.
         let (msg, _src_rank) = mpi_recv_any(world)?;
 
         match msg {
             // ── coordinator pushes a new op ───────────────────────────────────
             MpiMsg::P2POpAssignment { op_id, op, inputs } => {
                 local_queue.push_back((op_id, op, inputs));
+                next_steal_at = None;
+                backoff = Duration::from_millis(P2P_INITIAL_BACKOFF_MS);
             }
 
-            // ── another worker wants to steal from us (victim role) ───────────
+            // ── peer wants to steal from us (victim role) ─────────────────────
+            // Two-way: pop the op now and send it; no Ack needed.
             MpiMsg::P2PStealRequest { from_rank, request_id } => {
-                // Donate the tail op only if: queue is deep enough AND we have
-                // no op already reserved for another thief.
-                if local_queue.len() > steal_threshold && reserved_op.is_none() {
+                if local_queue.len() > steal_threshold {
                     let (oid, op, inputs) = local_queue.pop_back().unwrap();
                     mpi_send(
                         world,
@@ -485,17 +513,10 @@ fn p2p_worker_loop<C: Communicator>(
                         &MpiMsg::P2PStealResponse {
                             request_id,
                             op_id: Some(oid),
-                            op: Some(op.clone()),
-                            inputs: Some(inputs.clone()),
+                            op: Some(op),
+                            inputs: Some(inputs),
                         },
                     )?;
-                    reserved_op = Some(ReservedOp {
-                        request_id,
-                        thief_rank: from_rank,
-                        op_id: oid,
-                        op,
-                        inputs,
-                    });
                 } else {
                     mpi_send(
                         world,
@@ -511,6 +532,7 @@ fn p2p_worker_loop<C: Communicator>(
             }
 
             // ── victim replied to our steal (thief role) ──────────────────────
+            // Two-way: op is ours on receipt; no Ack sent.
             MpiMsg::P2PStealResponse { request_id, op_id, op, inputs } => {
                 if let Some(ps) = pending_steal.take() {
                     if ps.request_id == request_id {
@@ -520,57 +542,45 @@ fn p2p_worker_loop<C: Communicator>(
 
                         match (op_id, op, inputs) {
                             (Some(oid), Some(o), Some(inp)) => {
-                                // Confirm receipt: victim will commit the transfer.
-                                mpi_send(
-                                    world,
-                                    ps.victim_rank,
-                                    &MpiMsg::P2PStealAck { request_id, accepted: true },
-                                )?;
+                                if p2p_debug {
+                                    eprintln!(
+                                        "[p2p-debug] rank={rank} stole from={} latency={latency_ms:.2}ms",
+                                        ps.victim_rank
+                                    );
+                                }
                                 local_queue.push_back((oid, o, inp));
                                 peer_dir.record_outcome(ps.victim_rank, true);
                                 p2p_steals_successful += 1;
-                                backoff = Duration::from_millis(10);
+                                next_steal_at = None;
+                                backoff = Duration::from_millis(P2P_INITIAL_BACKOFF_MS);
                             }
                             _ => {
-                                // Victim had nothing; tell it so it can clean up.
-                                mpi_send(
-                                    world,
-                                    ps.victim_rank,
-                                    &MpiMsg::P2PStealAck { request_id, accepted: false },
-                                )?;
+                                if p2p_debug {
+                                    eprintln!(
+                                        "[p2p-debug] rank={rank} steal failed from={} \
+                                         latency={latency_ms:.2}ms backoff={}ms",
+                                        ps.victim_rank,
+                                        backoff.as_millis()
+                                    );
+                                }
                                 peer_dir.record_outcome(ps.victim_rank, false);
-                                // Exponential backoff, max 50 ms.
-                                let tw = Instant::now();
-                                std::thread::sleep(backoff);
-                                idle_time_ms += tw.elapsed().as_secs_f64() * 1000.0;
-                                backoff = (backoff * 2).min(Duration::from_millis(P2P_MAX_BACKOFF_MS));
+                                next_steal_at = Some(Instant::now() + backoff);
+                                backoff =
+                                    (backoff * 2).min(Duration::from_millis(P2P_MAX_BACKOFF_MS));
                             }
                         }
                     } else {
-                        // Stale response for a cancelled steal — put pending back.
+                        // Stale response for a previous request — restore pending.
                         pending_steal = Some(ps);
-                    }
-                }
-            }
-
-            // ── thief replied to our donation (victim role) ───────────────────
-            MpiMsg::P2PStealAck { request_id, accepted } => {
-                if let Some(ro) = reserved_op.take() {
-                    if ro.request_id == request_id {
-                        if !accepted {
-                            // Thief rejected; put the op back at the front.
-                            local_queue.push_front((ro.op_id, ro.op, ro.inputs));
-                        }
-                        // accepted=true: op belongs to the thief; nothing to do.
-                    } else {
-                        // Ack for a different request_id — restore reserved state.
-                        reserved_op = Some(ro);
                     }
                 }
             }
 
             // ── coordinator signals end of DAG ────────────────────────────────
             MpiMsg::Shutdown => {
+                if let Some(start) = idle_start.take() {
+                    idle_time_ms += start.elapsed().as_secs_f64() * 1000.0;
+                }
                 let avg_latency = if steal_latency_count > 0 {
                     steal_latency_sum_ms / steal_latency_count as f64
                 } else {
@@ -646,7 +656,9 @@ fn coordinator_loop<C: Communicator>(
                             .position(|&id| worker_for_op(id, n_workers) == worker_idx);
                         pos.and_then(|i| ready_queue.remove(i))
                     }
-                    MpiSchedulerMode::P2PWorkStealing => unreachable!("routed to p2p_coordinator_loop"),
+                    MpiSchedulerMode::P2PWorkStealing => {
+                        unreachable!("routed to p2p_coordinator_loop")
+                    }
                 };
 
                 let response = match maybe_op_id {
@@ -907,7 +919,6 @@ mod tests {
                 assert_eq!(op2, vec![1., 2., 3., 4.], "op2 P2P");
                 let op3: Vec<f32> = store[&3].data.iter().copied().collect();
                 assert_eq!(op3, vec![1., 2., 3., 4.], "op3 P2P");
-                // coordinator_messages should be recorded.
                 assert!(metrics.coordinator_messages > 0);
             }
 
