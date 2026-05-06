@@ -830,7 +830,11 @@ fn p2p_worker_loop<C: Communicator>(
                     // Got a message — hand it to the match below.
                     Some(m) => m,
 
-                    // Timed out: clean up pending steal, check idle threshold.
+                    // Timed out: clean up pending steal, then yield CPU before
+                    // re-entering the loop.  Without this sleep the path where
+                    // Instant::now() >= deadline is true at entry (deadline
+                    // already expired before poll_message_until is reached)
+                    // skips the probe entirely and spins at 100 % CPU.
                     None => {
                         if let Some(ps) = pending_steal.take() {
                             peer_dir.record_outcome(ps.victim_rank, false);
@@ -838,6 +842,7 @@ fn p2p_worker_loop<C: Communicator>(
                             backoff =
                                 (backoff * 2).min(Duration::from_millis(P2P_MAX_BACKOFF_MS));
                         }
+                        std::thread::sleep(Duration::from_millis(1));
                         continue;
                     }
                 }
